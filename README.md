@@ -1,6 +1,6 @@
 # ZatBoard
 
-**ZatBoard** is a privacy-preserving, directory-structured bulletin board and chat system built on Zcash Addressed Text (ZAT) — i.e., encrypted memos inside Zcash shielded transactions.
+**ZatBoard** is a privacy-preserving, directory-structured bulletin board and chat system built on Zcash — i.e., encrypted memos inside Zcash shielded transactions.
 
 It is designed to feel like a hybrid between a filesystem and a BBS (bulletin board system):
 
