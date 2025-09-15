@@ -16,7 +16,7 @@ Phase 0 – Setup & Environment
 
   - [ ] Send/receive transactions with memos on testnet.
 
-  - [ ] Decode memos locally.
+  - [x] Decode memos locally.
 
 - [x] Create GitHub repo with structure:
 
@@ -30,7 +30,7 @@ README.md
 
 Phase 1 – Core Zcash Memo Messaging
 
-- [ ] Implement basic Rust wrapper for zingo-cli (send/receive memos).
+- [x] Implement basic Rust wrapper for zingo-cli (send/receive memos).
 
 - [ ] Create Message struct (fields: sender, recipient, memo text, signature).
 
