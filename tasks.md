@@ -4,21 +4,21 @@ This document lists all the tasks required to build ZatBoard (Zcash Addressed Te
 
 Phase 0 – Setup & Environment
 
-- [ ] Install Rust toolchain (rustup, cargo).
+- [x] Install Rust toolchain (rustup, cargo).
 
-- [ ] Explore basic Rust syntax (ownership, structs, enums, traits).
+- [x] Explore basic Rust syntax (ownership, structs, enums, traits).
 
-- [ ] Install and set up zingo-cli or zingolib.
+- [x] Install and set up zingo-cli or zingolib.
 
-- [ ] Confirm you can:
+- [x] Confirm you can:
 
-  - [ ] Generate Zcash shielded addresses.
+  - [x] Generate Zcash shielded addresses.
 
   - [ ] Send/receive transactions with memos on testnet.
 
   - [ ] Decode memos locally.
 
-- [ ] Create GitHub repo with structure:
+- [x] Create GitHub repo with structure:
 
 /src        # Rust source  
 /docs       # Documentation  
