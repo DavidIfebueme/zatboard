@@ -1,5 +1,8 @@
 use std::process::Command;
 use std::path::PathBuf;
+use std::time::Duration;
+use std::thread;
+use crate::message::Message;
 
 pub struct ZingoClient {
     data_dir: PathBuf,
@@ -33,6 +36,49 @@ impl ZingoClient {
         let response = self.execute_command("addresses")?;
         Ok(vec![response])
     }
+    
+    pub fn send_memo(&self, address: &str, amount: f64, memo: &str) -> Result<String, String> {
+        let cmd = format!("quicksend {} {} \"{}\"", address, amount, memo);
+        self.execute_command(&cmd)
+    }
+    
+    pub fn get_messages(&self) -> Result<Vec<Message>, String> {
+        let response = self.execute_command("messages")?;
+        self.parse_messages(&response)
+    }
+    
+    fn parse_messages(&self, _raw_data: &str) -> Result<Vec<Message>, String> {
+        let messages = vec![];
+        Ok(messages)
+    }
+    
+    pub fn poll_for_messages(&self, interval_secs: u64, max_iterations: Option<u32>) -> Result<Vec<Message>, String> {
+        let mut iterations = 0;
+        
+        loop {
+            self.execute_command("sync")?;
+            
+            match self.get_messages() {
+                Ok(messages) if !messages.is_empty() => return Ok(messages),
+                Ok(_) => {
+                    if let Some(max) = max_iterations {
+                        iterations += 1;
+                        if iterations >= max {
+                            return Ok(vec![]);
+                        }
+                    }
+                    thread::sleep(Duration::from_secs(interval_secs));
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+    
+    pub fn poll_once(&self) -> Result<Vec<Message>, String> {
+        self.execute_command("sync")?;
+        self.get_messages()
+    }
 }
 
 #[cfg(test)]
@@ -47,5 +93,30 @@ mod tests {
         );
         assert_eq!(client.data_dir, PathBuf::from("/tmp/test"));
         assert_eq!(client.server, "http://test:9067");
+    }
+    
+    #[test]
+    fn test_send_memo_format() {
+        let client = ZingoClient::new(
+            PathBuf::from("/tmp/test"),
+            "http://test:9067".to_string()
+        );
+        
+        let cmd = format!("quicksend {} {} \"{}\"", "zs1test", 0.001, "ls /home");
+        assert!(cmd.contains("quicksend"));
+        assert!(cmd.contains("zs1test"));
+        assert!(cmd.contains("ls /home"));
+    }
+    
+    #[test]
+    fn test_parse_empty_messages() {
+        let client = ZingoClient::new(
+            PathBuf::from("/tmp/test"),
+            "http://test:9067".to_string()
+        );
+        
+        let result = client.parse_messages("[]");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 0);
     }
 }

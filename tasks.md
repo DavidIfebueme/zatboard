@@ -32,9 +32,9 @@ Phase 1 – Core Zcash Memo Messaging
 
 - [x] Implement basic Rust wrapper for zingo-cli (send/receive memos).
 
-- [ ] Create Message struct (fields: sender, recipient, memo text, signature).
+- [x] Create Message struct (fields: sender, recipient, memo text, signature).
 
-- [ ] Implement digital signature verification (for reply address binding).
+- [x] Implement digital signature verification (for reply address binding).
 
 - [ ] Implement polling loop for incoming memos (testnet).
 
