@@ -42,7 +42,7 @@ Phase 1 – Core Zcash Memo Messaging
 
 Phase 2 – Reply Address & Authentication
 
-- [ ] Add ability for user to set persistent reply-to shielded address.
+- [x] Add ability for user to set persistent reply-to shielded address.
 
 - [ ] Implement message signing (user signs their first command).
 
