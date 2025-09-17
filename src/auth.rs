@@ -1,5 +1,5 @@
 use crate::message::Message;
-use crate::user_session::{SessionManager, UserSession};
+use crate::user_session::SessionManager;
 use sha2::{Sha256, Digest};
 
 pub struct AuthenticationFlow {
@@ -13,9 +13,8 @@ impl AuthenticationFlow {
         }
     }
     
-    pub fn initiate_authentication(&mut self, user_id: String, reply_address: String) -> String {
-        let session = self.session_manager.create_session(user_id.clone(), reply_address);
-        
+    pub fn initiate_authentication(&mut self, user_id: String, _reply_address: String) -> String {
+        let _session = self.session_manager.create_session(user_id.clone(), _reply_address);
         let challenge = self.generate_challenge(&user_id);
         
         format!("AUTH_CHALLENGE:{}", challenge)
@@ -31,11 +30,11 @@ impl AuthenticationFlow {
     }
     
     pub fn create_signed_command(&self, user_id: &str, coordinator_address: &str, command: &str, private_key: &str) -> Result<Message, String> {
-        let reply_address = self.session_manager.get_reply_address(user_id)
+        let _reply_address = self.session_manager.get_reply_address(user_id)
             .ok_or("No reply address found for user")?;
             
         let mut message = Message::new(
-            reply_address,
+            _reply_address,
             coordinator_address.to_string(),
             command.to_string()
         );

@@ -152,7 +152,7 @@ impl FileNode {
 
 #[derive(Debug)]
 pub struct FileSystem {
-    root: FileNode,
+    pub root: FileNode,
 }
 
 impl FileSystem {

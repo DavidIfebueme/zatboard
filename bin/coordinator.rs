@@ -1,6 +1,4 @@
 use zatboard::coordinator::Coordinator;
-use zatboard::zingo_wrapper::ZingoClient;
-use std::path::PathBuf;
 
 fn main() {
     println!("🚀 ZatBoard Coordinator Daemon Starting...");

@@ -1,5 +1,6 @@
 use crate::message::Message;
 use crate::auth::AuthenticationFlow;
+use crate::filesystem::FileSystem;
 use std::collections::HashMap;
 use sha2::{Sha256, Digest};
 
@@ -8,6 +9,7 @@ pub struct Coordinator {
     verified_users: HashMap<String, String>,
     pending_challenges: HashMap<String, String>,
     session_mappings: HashMap<String, String>,
+    pub filesystem: FileSystem,
 }
 
 impl Coordinator {
@@ -17,6 +19,86 @@ impl Coordinator {
             verified_users: HashMap::new(),
             pending_challenges: HashMap::new(),
             session_mappings: HashMap::new(),
+            filesystem: FileSystem::new("coordinator".to_string()),
+        }
+    }
+
+    fn handle_authenticated_command(&mut self, message: &Message) -> Result<String, String> {
+        let user_id = &message.sender_address;
+        
+        if message.memo_text.starts_with("ls ") {
+            let path = message.memo_text.strip_prefix("ls ").unwrap_or("/");
+            return self.handle_ls_command(user_id, path);
+        }
+        
+        if message.memo_text.starts_with("cat ") {
+            let path = message.memo_text.strip_prefix("cat ").unwrap();
+            return self.handle_cat_command(user_id, path);
+        }
+        
+        if message.memo_text.starts_with("mkdir ") {
+            let path = message.memo_text.strip_prefix("mkdir ").unwrap();
+            return self.handle_mkdir_command(user_id, path);
+        }
+        
+        if message.memo_text.starts_with("touch ") {
+            let parts: Vec<&str> = message.memo_text.splitn(3, ' ').collect();
+            if parts.len() >= 2 {
+                let path = parts[1];
+                let content = if parts.len() == 3 { parts[2] } else { "" };
+                return self.handle_touch_command(user_id, path, content);
+            }
+        }
+        
+        Err("Unknown command. Try: ls <path>, cat <file>, mkdir <dir>, touch <file> [content]".to_string())
+    }
+    
+    fn handle_ls_command(&self, user_id: &str, path: &str) -> Result<String, String> {
+        let node = self.filesystem.resolve_path(path)
+            .ok_or_else(|| format!("Path not found: {}", path))?;
+            
+        if !node.permissions.can_read(user_id) {
+            return Err("Permission denied: cannot read directory".to_string());
+        }
+        
+        if node.file_type != crate::filesystem::FileType::Directory {
+            return Err("Not a directory".to_string());
+        }
+        
+        let listing = node.list_children();
+        if listing.is_empty() {
+            Ok("(empty directory)".to_string())
+        } else {
+            Ok(listing.join("  "))
+        }
+    }
+    
+    fn handle_cat_command(&self, user_id: &str, path: &str) -> Result<String, String> {
+        let node = self.filesystem.resolve_path(path)
+            .ok_or_else(|| format!("File not found: {}", path))?;
+            
+        if !node.permissions.can_read(user_id) {
+            return Err("Permission denied: cannot read file".to_string());
+        }
+        
+        if node.file_type != crate::filesystem::FileType::File {
+            return Err("Not a file".to_string());
+        }
+        
+        Ok(node.content.clone().unwrap_or_else(|| "(empty file)".to_string()))
+    }
+    
+    fn handle_mkdir_command(&mut self, user_id: &str, path: &str) -> Result<String, String> {
+        match self.filesystem.create_directory(path, user_id.to_string()) {
+            Ok(()) => Ok(format!("Directory created: {}", path)),
+            Err(e) => Err(e),
+        }
+    }
+    
+    fn handle_touch_command(&mut self, user_id: &str, path: &str, content: &str) -> Result<String, String> {
+        match self.filesystem.create_file(path, content.to_string(), user_id.to_string()) {
+            Ok(()) => Ok(format!("File created: {}", path)),
+            Err(e) => Err(e),
         }
     }
 
@@ -40,7 +122,7 @@ impl Coordinator {
             return Err("Invalid auth format. Use AUTH:<signed_challenge>".to_string());
         }
         
-        if let Some(expected_challenge) = self.pending_challenges.get(&message.sender_address) {
+        if let Some(_expected_challenge) = self.pending_challenges.get(&message.sender_address) {
             if message.signature.is_some() {
                 let session_id = self.generate_session_id(&message.sender_address);
                 
@@ -109,15 +191,6 @@ impl Coordinator {
         self.verified_users.contains_key(&message.sender_address) && message.signature.is_some()
     }
     
-    fn handle_authenticated_command(&mut self, message: &Message) -> Result<String, String> {
-        match message.memo_text.as_str() {
-            cmd if cmd.starts_with("ls ") => Ok("folder1/ folder2/ file.txt".to_string()),
-            cmd if cmd.starts_with("cat ") => Ok("File contents here...".to_string()),
-            cmd if cmd.starts_with("mkdir ") => Ok("Directory created successfully.".to_string()),
-            _ => Err("Unknown command. Try: ls, cat, mkdir".to_string()),
-        }
-    }
-    
     pub fn get_reply_address(&self, user_id: &str) -> Option<String> {
         self.verified_users.get(user_id).cloned()
     }
@@ -145,4 +218,43 @@ mod tests {
         assert!(result.is_ok());
         assert!(result.unwrap().contains("AUTH:"));
     }
+
+    #[test]
+    fn test_ls_command() {
+        let mut coordinator = Coordinator::new(3600);
+        
+        coordinator.filesystem.create_directory("/home", "coordinator".to_string()).unwrap();
+        coordinator.filesystem.create_file("/home/readme.txt", "Hello!".to_string(), "coordinator".to_string()).unwrap();
+        
+        coordinator.verified_users.insert("zs1user123".to_string(), "zs1reply456".to_string());
+        
+        let ls_msg = Message::new(
+            "zs1user123".to_string(),
+            "zs1coordinator".to_string(),
+            "ls /home".to_string()
+        );
+        
+        let result = coordinator.handle_authenticated_command(&ls_msg);
+        assert!(result.is_ok());
+        assert!(result.unwrap().contains("readme.txt"));
+    }
+    
+    #[test]
+    fn test_mkdir_command() {
+        let mut coordinator = Coordinator::new(3600);
+        coordinator.verified_users.insert("zs1user123".to_string(), "zs1reply456".to_string());
+        coordinator.filesystem.root.permissions.add_write_permission("zs1user123".to_string());
+    
+        let mkdir_msg = Message::new(
+            "zs1user123".to_string(),
+            "zs1coordinator".to_string(),
+            "mkdir /test".to_string()
+        );
+        
+        let result = coordinator.handle_authenticated_command(&mkdir_msg);
+        assert!(result.is_ok());
+        assert!(result.unwrap().contains("Directory created"));
+    }
+
+
 }
