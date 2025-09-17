@@ -44,7 +44,7 @@ Phase 2 – Reply Address & Authentication
 
 - [x] Add ability for user to set persistent reply-to shielded address.
 
-- [ ] Implement message signing (user signs their first command).
+- [x] Implement message signing (user signs their first command).
 
 - [ ] Coordinator verifies sender via signature + reply address.
 

@@ -3,7 +3,7 @@ use crate::user_session::{SessionManager, UserSession};
 use sha2::{Sha256, Digest};
 
 pub struct AuthenticationFlow {
-    session_manager: SessionManager,
+    pub session_manager: SessionManager,
 }
 
 impl AuthenticationFlow {
