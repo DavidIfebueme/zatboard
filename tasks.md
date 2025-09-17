@@ -46,9 +46,9 @@ Phase 2 – Reply Address & Authentication
 
 - [x] Implement message signing (user signs their first command).
 
-- [ ] Coordinator verifies sender via signature + reply address.
+- [x] Coordinator verifies sender via signature + reply address.
 
-- [ ] Store mapping of session_id → reply_address.
+- [x] Store mapping of session_id → reply_address.
 
 Phase 3 – Filesystem Commands
 
