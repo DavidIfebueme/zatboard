@@ -56,7 +56,7 @@ Phase 3 – Filesystem Commands
 
 - [ ] Implement command parsing:
 
-  - [ ] ls <folder> → list contents.
+  - [x] ls <folder> → list contents.
 
   - [ ] cat <file> → show file content.
 
