@@ -36,9 +36,9 @@ Phase 1 – Core Zcash Memo Messaging
 
 - [x] Implement digital signature verification (for reply address binding).
 
-- [ ] Implement polling loop for incoming memos (testnet).
+- [x] Implement polling loop for incoming memos (testnet).
 
-- [ ] Write unit test: send memo → receive memo → parse message.
+- [x] Write unit test: send memo → receive memo → parse message.
 
 Phase 2 – Reply Address & Authentication
 
