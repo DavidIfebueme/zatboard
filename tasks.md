@@ -52,7 +52,7 @@ Phase 2 – Reply Address & Authentication
 
 Phase 3 – Filesystem Commands
 
-- [ ] Define directory structure model (Folder, File, permissions).
+- [x] Define directory structure model (Folder, File, permissions).
 
 - [ ] Implement command parsing:
 
