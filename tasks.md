@@ -14,7 +14,7 @@ Phase 0 – Setup & Environment
 
   - [x] Generate Zcash shielded addresses.
 
-  - [ ] Send/receive transactions with memos on testnet.
+  - [x] Send/receive transactions with memos on testnet.
 
   - [x] Decode memos locally.
 

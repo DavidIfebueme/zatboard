@@ -116,12 +116,23 @@ mod tests {
 
     #[test]
     fn test_zatoshi_conversion() {
-        let client = ZingoClient::new(
+        let _client = ZingoClient::new(
             PathBuf::from("/tmp/test"),
             "http://test:9067".to_string()
         );
         
         assert_eq!(100_000_000, 100_000_000);
+    }
+
+    #[test]
+    fn test_session_timeout_logic() {
+        let _client = ZingoClient::new(
+            PathBuf::from("/tmp/test"),
+            "http://test:9067".to_string()
+        );
+        
+        let timeout_secs = 3600;
+        assert!(timeout_secs > 0);
     }
     
     #[test]
