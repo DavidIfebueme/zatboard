@@ -37,9 +37,14 @@ impl ZingoClient {
         Ok(vec![response])
     }
     
-    pub fn send_memo(&self, address: &str, amount: f64, memo: &str) -> Result<String, String> {
-        let cmd = format!("quicksend {} {} \"{}\"", address, amount, memo);
+    pub fn send_memo(&self, address: &str, amount_zatoshis: u64, memo: &str) -> Result<String, String> {
+        let cmd = format!("quicksend {} {} \"{}\"", address, amount_zatoshis, memo);
         self.execute_command(&cmd)
+    }
+
+    pub fn send_memo_zec(&self, address: &str, amount_zec: f64, memo: &str) -> Result<String, String> {
+        let zatoshis = (amount_zec * 100_000_000.0) as u64;
+        self.send_memo(address, zatoshis, memo)
     }
     
     pub fn get_messages(&self) -> Result<Vec<Message>, String> {
@@ -102,10 +107,21 @@ mod tests {
             "http://test:9067".to_string()
         );
         
-        let cmd = format!("quicksend {} {} \"{}\"", "zs1test", 0.001, "ls /home");
+        let cmd = format!("quicksend {} {} \"{}\"", "zs1test", 100000, "ls /home");
         assert!(cmd.contains("quicksend"));
         assert!(cmd.contains("zs1test"));
         assert!(cmd.contains("ls /home"));
+        assert!(cmd.contains("100000"));
+    }
+
+    #[test]
+    fn test_zatoshi_conversion() {
+        let client = ZingoClient::new(
+            PathBuf::from("/tmp/test"),
+            "http://test:9067".to_string()
+        );
+        
+        assert_eq!(100_000_000, 100_000_000);
     }
     
     #[test]
