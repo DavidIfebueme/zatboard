@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 #[test]
 fn test_full_memo_workflow() {
-    let client = ZingoClient::new(
+    let _client = ZingoClient::new(
         PathBuf::from("/tmp/test-integration"),
         "https://example.com:9067".to_string()
     );
@@ -27,7 +27,7 @@ fn test_full_memo_workflow() {
 
 #[test]
 fn test_zatoshi_amounts() {
-    let client = ZingoClient::new(
+    let _client = ZingoClient::new(
         PathBuf::from("/tmp/test"),
         "https://example.com:9067".to_string()
     );

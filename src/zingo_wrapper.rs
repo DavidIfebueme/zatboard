@@ -102,7 +102,7 @@ mod tests {
     
     #[test]
     fn test_send_memo_format() {
-        let client = ZingoClient::new(
+        let _client = ZingoClient::new(
             PathBuf::from("/tmp/test"),
             "http://test:9067".to_string()
         );

@@ -254,6 +254,38 @@ impl FileSystem {
         
         Ok((parent_path, file_name))
     }
+
+    pub fn remove(&mut self, path: &str, user: &str) -> Result<(), String> {
+        if path == "/" {
+            return Err("Cannot remove root directory".to_string());
+        }
+        
+        let (parent_path, item_name) = self.split_path(path)?;
+        
+        let parent = self.resolve_path_mut(&parent_path)
+            .ok_or_else(|| format!("Parent directory not found: {}", parent_path))?;
+            
+        if !parent.permissions.can_write(user) {
+            return Err("Permission denied: cannot write to parent directory".to_string());
+        }
+        
+        if !parent.children.contains_key(&item_name) {
+            return Err(format!("File or directory not found: {}", path));
+        }
+        
+        let item = parent.children.get(&item_name).unwrap();
+        if item.permissions.owner != user && !parent.permissions.can_write(user) {
+            return Err("Permission denied: cannot remove item".to_string());
+        }
+        
+        parent.children.remove(&item_name);
+        parent.modified_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+            
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -315,4 +347,52 @@ mod tests {
         
         assert_eq!(listing, vec!["file1.txt", "file2.txt"]);
     }
+
+    #[test]
+    fn test_file_removal() {
+        let mut fs = FileSystem::new("zs1owner123".to_string());
+        
+        fs.create_directory("/home", "zs1owner123".to_string()).unwrap();
+        fs.create_file("/home/temp.txt", "temporary".to_string(), "zs1owner123".to_string()).unwrap();
+        
+        assert!(fs.resolve_path("/home/temp.txt").is_some());
+        
+        let result = fs.remove("/home/temp.txt", "zs1owner123");
+        assert!(result.is_ok());
+        assert!(fs.resolve_path("/home/temp.txt").is_none());
+    }
+    
+    #[test]
+    fn test_directory_removal() {
+        let mut fs = FileSystem::new("zs1owner123".to_string());
+        
+        fs.create_directory("/temp_dir", "zs1owner123".to_string()).unwrap();
+        
+        assert!(fs.resolve_path("/temp_dir").is_some());
+        
+        let result = fs.remove("/temp_dir", "zs1owner123");
+        assert!(result.is_ok());
+        assert!(fs.resolve_path("/temp_dir").is_none());
+    }
+    
+    #[test]
+    fn test_remove_permission_denied() {
+        let mut fs = FileSystem::new("zs1owner123".to_string());
+        
+        fs.create_file("/protected.txt", "secret".to_string(), "zs1owner123".to_string()).unwrap();
+        
+        let result = fs.remove("/protected.txt", "zs1other456");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Permission denied"));
+    }
+    
+    #[test]
+    fn test_remove_root_denied() {
+        let mut fs = FileSystem::new("zs1owner123".to_string());
+        
+        let result = fs.remove("/", "zs1owner123");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Cannot remove root directory"));
+    }
+
 }

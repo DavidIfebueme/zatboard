@@ -40,6 +40,11 @@ impl Coordinator {
             let path = message.memo_text.strip_prefix("mkdir ").unwrap();
             return self.handle_mkdir_command(user_id, path);
         }
+
+        if message.memo_text.starts_with("rm ") {
+            let path = message.memo_text.strip_prefix("rm ").unwrap();
+            return self.handle_rm_command(user_id, path);
+        }
         
         if message.memo_text.starts_with("touch ") {
             let parts: Vec<&str> = message.memo_text.splitn(3, ' ').collect();
@@ -101,6 +106,13 @@ impl Coordinator {
             Err(e) => Err(e),
         }
     }
+
+    fn handle_rm_command(&mut self, user_id: &str, path: &str) -> Result<String, String> {
+    match self.filesystem.remove(path, user_id) {
+        Ok(()) => Ok(format!("Removed: {}", path)),
+        Err(e) => Err(e),
+    }
+}
 
     fn generate_session_id(&self, user_address: &str) -> String {
         let timestamp = std::time::SystemTime::now()
@@ -256,5 +268,61 @@ mod tests {
         assert!(result.unwrap().contains("Directory created"));
     }
 
+    #[test]
+    fn test_rm_command() {
+        let mut coordinator = Coordinator::new(3600);
+        coordinator.verified_users.insert("zs1user123".to_string(), "zs1reply456".to_string()); 
+        coordinator.filesystem.root.permissions.add_write_permission("zs1user123".to_string());
+        coordinator.filesystem.create_file("/test.txt", "content".to_string(), "zs1user123".to_string()).unwrap();
+        
+        let rm_msg = Message::new(
+            "zs1user123".to_string(),
+            "zs1coordinator".to_string(),
+            "rm /test.txt".to_string()
+        );
+        
+        let result = coordinator.handle_authenticated_command(&rm_msg);
+        assert!(result.is_ok());
+        assert!(result.unwrap().contains("Removed"));
+        assert!(coordinator.filesystem.resolve_path("/test.txt").is_none());
+    }
+    
+    #[test]
+    fn test_touch_command() {
+        let mut coordinator = Coordinator::new(3600);
+        coordinator.verified_users.insert("zs1user123".to_string(), "zs1reply456".to_string());
+        coordinator.filesystem.root.permissions.add_write_permission("zs1user123".to_string());
+        
+        let touch_msg = Message::new(
+            "zs1user123".to_string(),
+            "zs1coordinator".to_string(),
+            "touch /newfile.txt Hello World!".to_string()
+        );
+        
+        let result = coordinator.handle_authenticated_command(&touch_msg);
+        assert!(result.is_ok());
+        assert!(result.unwrap().contains("File created"));
+        
+        let file = coordinator.filesystem.resolve_path("/newfile.txt").unwrap();
+        assert_eq!(file.content, Some("Hello World!".to_string()));
+    }
+    
+    #[test]
+    fn test_cat_command() {
+        let mut coordinator = Coordinator::new(3600);
+        coordinator.verified_users.insert("zs1user123".to_string(), "zs1reply456".to_string());
+        
+        coordinator.filesystem.create_file("/readme.txt", "Hello from ZatBoard!".to_string(), "coordinator".to_string()).unwrap();
+        
+        let cat_msg = Message::new(
+            "zs1user123".to_string(),
+            "zs1coordinator".to_string(),
+            "cat /readme.txt".to_string()
+        );
+        
+        let result = coordinator.handle_authenticated_command(&cat_msg);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "Hello from ZatBoard!");
+    }
 
 }
