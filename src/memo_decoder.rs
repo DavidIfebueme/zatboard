@@ -59,7 +59,7 @@ mod tests {
     
     #[test]
     fn test_memo_decoding() {
-        let raw_data = b"cat /readme.txt\0\0\0\0"; // Null-padded
+        let raw_data = b"cat /readme.txt\0\0\0\0";
         let memo = ZcashMemo::new(raw_data);
         
         assert_eq!(memo.text, Some("cat /readme.txt".to_string()));

@@ -1,7 +1,9 @@
 use crate::message::Message;
 use crate::auth::AuthenticationFlow;
 use crate::filesystem::FileSystem;
+use crate::zingo_wrapper::ZingoClient;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use sha2::{Sha256, Digest};
 
 pub struct Coordinator {
@@ -10,17 +12,34 @@ pub struct Coordinator {
     pending_challenges: HashMap<String, String>,
     session_mappings: HashMap<String, String>,
     pub filesystem: FileSystem,
+    zingo_client: ZingoClient,
 }
 
 impl Coordinator {
-    pub fn new(session_timeout: u64) -> Self {
+    pub fn new(session_timeout: u64, zingo_data_dir: PathBuf, zingo_server: String) -> Self {
         Coordinator {
             auth_flow: AuthenticationFlow::new(session_timeout),
             verified_users: HashMap::new(),
             pending_challenges: HashMap::new(),
             session_mappings: HashMap::new(),
             filesystem: FileSystem::new("coordinator".to_string()),
+            zingo_client: ZingoClient::new(zingo_data_dir, zingo_server),
         }
+    }
+
+    pub fn send_response(&mut self, user_id: &str, response: &str) -> Result<(), String> {
+        if let Some(reply_address) = self.get_reply_address(user_id) {
+            self.zingo_client.send_memo(&reply_address, 1000, response)?;
+            Ok(())
+        } else {
+            Err("No reply address found for user".to_string())
+        }
+    }
+
+    pub fn process_and_respond(&mut self, message: &Message) -> Result<(), String> {
+        let response = self.process_incoming_message(message)?;
+        self.send_response(&message.sender_address, &response)?;
+        Ok(())
     }
 
     fn handle_authenticated_command(&mut self, message: &Message) -> Result<String, String> {
@@ -253,15 +272,25 @@ impl Coordinator {
     pub fn is_user_verified(&self, user_id: &str) -> bool {
         self.verified_users.contains_key(user_id)
     }
+
+    pub fn poll_for_new_messages(&mut self) -> Result<Vec<Message>, String> {
+        self.zingo_client.poll_for_messages(5, Some(1))
+    }
+    
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
     
     #[test]
     fn test_coordinator_registration() {
-        let mut coordinator = Coordinator::new(3600);
+        let mut coordinator = Coordinator::new(
+            3600, 
+            PathBuf::from("/tmp/test"), 
+            "http://test:9067".to_string()
+        );
         
         let register_msg = Message::new(
             "zs1user123".to_string(),
@@ -276,7 +305,11 @@ mod tests {
 
     #[test]
     fn test_ls_command() {
-        let mut coordinator = Coordinator::new(3600);
+        let mut coordinator = Coordinator::new(
+            3600, 
+            PathBuf::from("/tmp/test"), 
+            "http://test:9067".to_string()
+        );
         
         coordinator.filesystem.create_directory("/home", "coordinator".to_string()).unwrap();
         coordinator.filesystem.create_file("/home/readme.txt", "Hello!".to_string(), "coordinator".to_string()).unwrap();
@@ -296,7 +329,11 @@ mod tests {
     
     #[test]
     fn test_mkdir_command() {
-        let mut coordinator = Coordinator::new(3600);
+        let mut coordinator = Coordinator::new(
+            3600, 
+            PathBuf::from("/tmp/test"), 
+            "http://test:9067".to_string()
+        );
         coordinator.verified_users.insert("zs1user123".to_string(), "zs1reply456".to_string());
         coordinator.filesystem.root.permissions.add_write_permission("zs1user123".to_string());
     
@@ -313,7 +350,11 @@ mod tests {
 
     #[test]
     fn test_rm_command() {
-        let mut coordinator = Coordinator::new(3600);
+        let mut coordinator = Coordinator::new(
+            3600, 
+            PathBuf::from("/tmp/test"), 
+            "http://test:9067".to_string()
+        );
         coordinator.verified_users.insert("zs1user123".to_string(), "zs1reply456".to_string()); 
         coordinator.filesystem.root.permissions.add_write_permission("zs1user123".to_string());
         coordinator.filesystem.create_file("/test.txt", "content".to_string(), "zs1user123".to_string()).unwrap();
@@ -332,7 +373,11 @@ mod tests {
     
     #[test]
     fn test_touch_command() {
-        let mut coordinator = Coordinator::new(3600);
+        let mut coordinator = Coordinator::new(
+            3600, 
+            PathBuf::from("/tmp/test"), 
+            "http://test:9067".to_string()
+        );
         coordinator.verified_users.insert("zs1user123".to_string(), "zs1reply456".to_string());
         coordinator.filesystem.root.permissions.add_write_permission("zs1user123".to_string());
         
@@ -352,7 +397,11 @@ mod tests {
     
     #[test]
     fn test_cat_command() {
-        let mut coordinator = Coordinator::new(3600);
+        let mut coordinator = Coordinator::new(
+            3600, 
+            PathBuf::from("/tmp/test"), 
+            "http://test:9067".to_string()
+        );
         coordinator.verified_users.insert("zs1user123".to_string(), "zs1reply456".to_string());
         
         coordinator.filesystem.create_file("/readme.txt", "Hello from ZatBoard!".to_string(), "coordinator".to_string()).unwrap();
@@ -370,7 +419,11 @@ mod tests {
 
     #[test]
     fn test_echo_command() {
-        let mut coordinator = Coordinator::new(3600);
+        let mut coordinator = Coordinator::new(
+            3600, 
+            PathBuf::from("/tmp/test"), 
+            "http://test:9067".to_string()
+        );
         coordinator.verified_users.insert("zs1user123".to_string(), "zs1reply456".to_string());
         coordinator.filesystem.root.permissions.add_write_permission("zs1user123".to_string());
         
@@ -390,7 +443,11 @@ mod tests {
 
     #[test]
     fn test_echo_update_existing_file() {
-        let mut coordinator = Coordinator::new(3600);
+        let mut coordinator = Coordinator::new(
+            3600, 
+            PathBuf::from("/tmp/test"), 
+            "http://test:9067".to_string()
+        );
         coordinator.verified_users.insert("zs1user123".to_string(), "zs1reply456".to_string());
         coordinator.filesystem.root.permissions.add_write_permission("zs1user123".to_string());
         
