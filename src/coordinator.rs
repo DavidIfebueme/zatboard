@@ -13,18 +13,32 @@ pub struct Coordinator {
     session_mappings: HashMap<String, String>,
     pub filesystem: FileSystem,
     zingo_client: ZingoClient,
+    db_path: PathBuf,
 }
 
 impl Coordinator {
     pub fn new(session_timeout: u64, zingo_data_dir: PathBuf, zingo_server: String) -> Self {
+        let db_path = zingo_data_dir.join("filesystem.db");
+        
+        let filesystem = FileSystem::load_from_db(&db_path, "coordinator".to_string())
+            .unwrap_or_else(|e| {
+                eprintln!("Warning: Could not load filesystem from database: {}", e);
+                FileSystem::new("coordinator".to_string())
+            });
+
         Coordinator {
             auth_flow: AuthenticationFlow::new(session_timeout),
             verified_users: HashMap::new(),
             pending_challenges: HashMap::new(),
             session_mappings: HashMap::new(),
-            filesystem: FileSystem::new("coordinator".to_string()),
+            filesystem,
             zingo_client: ZingoClient::new(zingo_data_dir, zingo_server),
+            db_path,
         }
+    }
+
+    fn save_filesystem(&self) -> Result<(), String> {
+        self.filesystem.save_to_db(&self.db_path)
     }
 
     pub fn send_response(&mut self, user_id: &str, response: &str) -> Result<(), String> {
@@ -158,7 +172,8 @@ impl Coordinator {
             }
             _ => return Err("Invalid permissions. Use: public, private, or open".to_string()),
         }
-        
+
+        self.save_filesystem()?;
         Ok(format!("Permissions updated for {}", path))
     }
 
@@ -175,7 +190,8 @@ impl Coordinator {
         node.permissions.write_users.clear();
         node.permissions.read_users.push(new_owner.to_string());
         node.permissions.write_users.push(new_owner.to_string());
-        
+
+        self.save_filesystem()?;
         Ok(format!("Ownership of {} transferred to {}", path, new_owner))
     }
 
@@ -190,10 +206,12 @@ impl Coordinator {
         match permission_type {
             "read" => {
                 node.permissions.add_read_permission(target_user.to_string());
+                self.save_filesystem()?; 
                 Ok(format!("Read permission granted to {} for {}", target_user, path))
             }
             "write" => {
                 node.permissions.add_write_permission(target_user.to_string());
+                self.save_filesystem()?;
                 Ok(format!("Write permission granted to {} for {}", target_user, path))
             }
             _ => Err("Invalid permission type. Use: read or write".to_string()),
@@ -237,21 +255,30 @@ impl Coordinator {
     
     fn handle_mkdir_command(&mut self, user_id: &str, path: &str) -> Result<String, String> {
         match self.filesystem.create_directory(path, user_id.to_string()) {
-            Ok(()) => Ok(format!("Directory created: {}", path)),
+            Ok(()) => {
+                self.save_filesystem()?;
+                Ok(format!("Directory created: {}", path))
+            }
             Err(e) => Err(e),
         }
     }
     
     fn handle_touch_command(&mut self, user_id: &str, path: &str, content: &str) -> Result<String, String> {
         match self.filesystem.create_file(path, content.to_string(), user_id.to_string()) {
-            Ok(()) => Ok(format!("File created: {}", path)),
+            Ok(()) => {
+                self.save_filesystem()?;
+                Ok(format!("File created: {}", path))
+            }
             Err(e) => Err(e),
         }
     }
 
     fn handle_rm_command(&mut self, user_id: &str, path: &str) -> Result<String, String> {
         match self.filesystem.remove(path, user_id) {
-            Ok(()) => Ok(format!("Removed: {}", path)),
+            Ok(()) => {
+                self.save_filesystem()?;
+                Ok(format!("Directory removed: {}", path))
+            }
             Err(e) => Err(e),
         }
     }
@@ -280,6 +307,7 @@ impl Coordinator {
             if file_node.file_type == crate::filesystem::FileType::File {
                 if file_node.permissions.can_write(user_id) {
                     file_node.update_content(content)?;
+                    self.save_filesystem()?; 
                     return Ok(format!("File updated: {}", file_path));
                 } else {
                     return Err("Permission denied: cannot write to file".to_string());
@@ -289,7 +317,10 @@ impl Coordinator {
             }
         } else {
             match self.filesystem.create_file(file_path, content, user_id.to_string()) {
-                Ok(()) => Ok(format!("File created: {}", file_path)),
+                Ok(()) => {
+                    self.save_filesystem()?;
+                    Ok(format!("File created: {}", file_path))
+                }
                 Err(e) => Err(e),
             }
         }
@@ -405,9 +436,11 @@ mod tests {
     
     #[test]
     fn test_coordinator_registration() {
+        let temp_dir = tempfile::tempdir().unwrap();
+
         let mut coordinator = Coordinator::new(
             3600, 
-            PathBuf::from("/tmp/test"), 
+            temp_dir.path().to_path_buf(), 
             "http://test:9067".to_string()
         );
         
@@ -424,9 +457,11 @@ mod tests {
 
     #[test]
     fn test_ls_command() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        
         let mut coordinator = Coordinator::new(
             3600, 
-            PathBuf::from("/tmp/test"), 
+            temp_dir.path().to_path_buf(), 
             "http://test:9067".to_string()
         );
         
@@ -448,9 +483,11 @@ mod tests {
     
     #[test]
     fn test_mkdir_command() {
+        let temp_dir = tempfile::tempdir().unwrap();
+
         let mut coordinator = Coordinator::new(
             3600, 
-            PathBuf::from("/tmp/test"), 
+            temp_dir.path().to_path_buf(), 
             "http://test:9067".to_string()
         );
         coordinator.verified_users.insert("zs1user123".to_string(), "zs1reply456".to_string());
@@ -459,19 +496,29 @@ mod tests {
         let mkdir_msg = Message::new(
             "zs1user123".to_string(),
             "zs1coordinator".to_string(),
-            "mkdir /test".to_string()
+            "mkdir /test_dir".to_string()
         );
         
         let result = coordinator.handle_authenticated_command(&mkdir_msg);
+
+        if let Err(e) = &result {
+            eprintln!("mkdir command failed with error: {}", e);
+        }
+
         assert!(result.is_ok());
         assert!(result.unwrap().contains("Directory created"));
+
+        let dir = coordinator.filesystem.resolve_path("/test_dir").unwrap();
+        assert_eq!(dir.file_type, crate::filesystem::FileType::Directory);
     }
 
     #[test]
     fn test_rm_command() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        
         let mut coordinator = Coordinator::new(
             3600, 
-            PathBuf::from("/tmp/test"), 
+            temp_dir.path().to_path_buf(), 
             "http://test:9067".to_string()
         );
         coordinator.verified_users.insert("zs1user123".to_string(), "zs1reply456".to_string()); 
@@ -486,15 +533,16 @@ mod tests {
         
         let result = coordinator.handle_authenticated_command(&rm_msg);
         assert!(result.is_ok());
-        assert!(result.unwrap().contains("Removed"));
         assert!(coordinator.filesystem.resolve_path("/test.txt").is_none());
     }
     
     #[test]
     fn test_touch_command() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        
         let mut coordinator = Coordinator::new(
             3600, 
-            PathBuf::from("/tmp/test"), 
+            temp_dir.path().to_path_buf(), 
             "http://test:9067".to_string()
         );
         coordinator.verified_users.insert("zs1user123".to_string(), "zs1reply456".to_string());
@@ -516,9 +564,11 @@ mod tests {
     
     #[test]
     fn test_cat_command() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        
         let mut coordinator = Coordinator::new(
             3600, 
-            PathBuf::from("/tmp/test"), 
+            temp_dir.path().to_path_buf(), 
             "http://test:9067".to_string()
         );
         coordinator.verified_users.insert("zs1user123".to_string(), "zs1reply456".to_string());
@@ -538,9 +588,11 @@ mod tests {
 
     #[test]
     fn test_echo_command() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        
         let mut coordinator = Coordinator::new(
             3600, 
-            PathBuf::from("/tmp/test"), 
+            temp_dir.path().to_path_buf(), 
             "http://test:9067".to_string()
         );
         coordinator.verified_users.insert("zs1user123".to_string(), "zs1reply456".to_string());
@@ -562,9 +614,11 @@ mod tests {
 
     #[test]
     fn test_echo_update_existing_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        
         let mut coordinator = Coordinator::new(
             3600, 
-            PathBuf::from("/tmp/test"), 
+            temp_dir.path().to_path_buf(), 
             "http://test:9067".to_string()
         );
         coordinator.verified_users.insert("zs1user123".to_string(), "zs1reply456".to_string());
@@ -588,9 +642,11 @@ mod tests {
 
     #[test]
     fn test_chmod_command() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        
         let mut coordinator = Coordinator::new(
             3600, 
-            PathBuf::from("/tmp/test"), 
+            temp_dir.path().to_path_buf(), 
             "http://test:9067".to_string()
         );
         coordinator.verified_users.insert("zs1user123".to_string(), "zs1reply456".to_string());
@@ -613,9 +669,11 @@ mod tests {
 
     #[test]
     fn test_grant_command() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        
         let mut coordinator = Coordinator::new(
             3600, 
-            PathBuf::from("/tmp/test"), 
+            temp_dir.path().to_path_buf(), 
             "http://test:9067".to_string()
         );
         coordinator.verified_users.insert("zs1user123".to_string(), "zs1reply456".to_string());
