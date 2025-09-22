@@ -1,13 +1,36 @@
 use zatboard::coordinator::Coordinator;
+use zatboard::config::CoordinatorConfig;
 use std::path::PathBuf;
+use tokio;
 
-fn main() {
+#[tokio::main]
+async fn main() {
     println!("ZatBoard Coordinator Daemon Starting...");
     
-    let zingo_data_dir = PathBuf::from("./coordinator_data");
-    let zingo_server = "http://localhost:9067".to_string();
+    let config_path = PathBuf::from("coordinator.toml");
+    let config = match CoordinatorConfig::load_from_file(&config_path) {
+        Ok(config) => config,
+        Err(e) => {
+            eprintln!("Error loading config: {}", e);
+            std::process::exit(1);
+        }
+    };
     
-    let mut coordinator = Coordinator::new(3600, zingo_data_dir, zingo_server);
+    println!("Configuration loaded from: {}", config_path.display());
+    println!("Data directory: {}", config.storage.data_dir.display());
+    println!("Polling interval: {}s", config.network.polling_interval_secs);
+    println!("Fees enabled: {}", config.fees.enabled);
+    
+    let mut coordinator = Coordinator::new(
+        3600, 
+        config.storage.data_dir.clone(), 
+        config.network.zingo_server.clone()
+    );
+
+    if config.api.enable_json_rpc {
+        println!("JSON-RPC server would start on {}:{}", config.api.bind_address, config.api.bind_port);
+        // TODO: Implement JSON-RPC server properly
+    }
     
     println!("Coordinator ready. Aggressive polling enabled for low latency...");
     
@@ -26,6 +49,6 @@ fn main() {
             }
         }
         
-        std::thread::sleep(std::time::Duration::from_secs(1));
+        std::thread::sleep(std::time::Duration::from_secs(config.network.polling_interval_secs));
     }
 }

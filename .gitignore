@@ -4,3 +4,4 @@ zingo_wrapper
 target/
 Cargo.lock
 tasks.md
+coordinator.toml

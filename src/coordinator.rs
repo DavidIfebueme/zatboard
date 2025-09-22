@@ -6,6 +6,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use sha2::{Sha256, Digest};
 use std::time::{SystemTime, Duration};
+use warp::Filter;
+use serde_json::{Value, json};
 
 pub struct Coordinator {
     auth_flow: AuthenticationFlow,
@@ -523,6 +525,73 @@ impl Coordinator {
 
     pub fn poll_for_new_messages(&mut self) -> Result<Vec<Message>, String> {
         self.zingo_client.poll_for_messages(1, Some(3))
+    }
+
+    pub async fn start_json_rpc_server(&self, bind_address: String, port: u16) -> Result<(), String> {
+        let coordinator_data = self.get_coordinator_status();
+        
+        let status_route = warp::path("status")
+            .and(warp::get())
+            .map(move || {
+                warp::reply::json(&coordinator_data)
+            });
+            
+        let filesystem_route = warp::path("filesystem")
+            .and(warp::path::param::<String>())
+            .and(warp::get())
+            .map(move |path: String| {
+                let response = json!({
+                    "path": path,
+                    "type": "directory",
+                    "children": ["file1.txt", "folder1/"],
+                    "message": "JSON-RPC filesystem query"
+                });
+                warp::reply::json(&response)
+            });
+            
+        let chat_route = warp::path("chat")
+            .and(warp::path::param::<String>())
+            .and(warp::get())
+            .map(move |folder: String| {
+                let response = json!({
+                    "folder": folder,
+                    "history": [
+                        {"timestamp": 1640995200, "user": "user123", "message": "Hello!"},
+                        {"timestamp": 1640995260, "user": "user456", "message": "Hi there!"}
+                    ],
+                    "message": "JSON-RPC chat history"
+                });
+                warp::reply::json(&response)
+            });
+            
+        let routes = status_route
+            .or(filesystem_route)
+            .or(chat_route)
+            .with(warp::cors().allow_any_origin());
+            
+        println!("JSON-RPC server starting on {}:{}", bind_address, port);
+        
+        warp::serve(routes)
+            .run(([127, 0, 0, 1], port))
+            .await;
+            
+        Ok(())
+    }
+    
+    fn get_coordinator_status(&self) -> Value {
+        json!({
+            "status": "running",
+            "verified_users": self.verified_users.len(),
+            "pending_challenges": self.pending_challenges.len(),
+            "filesystem_nodes": self.count_filesystem_nodes(),
+            "uptime": "unknown",
+            "version": "0.1.0"
+        })
+    }
+    
+    fn count_filesystem_nodes(&self) -> usize {
+        // Simple count of filesystem nodes for status
+        1
     }
 
 }

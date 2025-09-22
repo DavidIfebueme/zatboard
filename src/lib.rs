@@ -5,3 +5,4 @@ pub mod user_session;
 pub mod auth;
 pub mod coordinator;
 pub mod filesystem;
+pub mod config;
