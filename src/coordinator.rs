@@ -45,6 +45,10 @@ impl Coordinator {
             let path = message.memo_text.strip_prefix("rm ").unwrap();
             return self.handle_rm_command(user_id, path);
         }
+
+        if message.memo_text.contains(" > ") {
+            return self.handle_echo_command(user_id, &message.memo_text);
+        }
         
         if message.memo_text.starts_with("touch ") {
             let parts: Vec<&str> = message.memo_text.splitn(3, ' ').collect();
@@ -55,7 +59,7 @@ impl Coordinator {
             }
         }
         
-        Err("Unknown command. Try: ls <path>, cat <file>, mkdir <dir>, touch <file> [content]".to_string())
+        Err("Unknown command. Try: ls <path>, cat <file>, mkdir <dir>, rm <path>, touch <file>, echo \"msg\" > <file>".to_string())
     }
     
     fn handle_ls_command(&self, user_id: &str, path: &str) -> Result<String, String> {
@@ -108,11 +112,50 @@ impl Coordinator {
     }
 
     fn handle_rm_command(&mut self, user_id: &str, path: &str) -> Result<String, String> {
-    match self.filesystem.remove(path, user_id) {
-        Ok(()) => Ok(format!("Removed: {}", path)),
-        Err(e) => Err(e),
+        match self.filesystem.remove(path, user_id) {
+            Ok(()) => Ok(format!("Removed: {}", path)),
+            Err(e) => Err(e),
+        }
     }
-}
+
+    fn handle_echo_command(&mut self, user_id: &str, command: &str) -> Result<String, String> {
+        let parts: Vec<&str> = command.splitn(2, " > ").collect();
+        if parts.len() != 2 {
+            return Err("Invalid echo format. Use: echo \"content\" > <file>".to_string());
+        }
+        
+        let echo_part = parts[0].trim();
+        let file_path = parts[1].trim();
+        
+        if !echo_part.starts_with("echo ") {
+            return Err("Command must start with 'echo'".to_string());
+        }
+        
+        let content_part = echo_part.strip_prefix("echo ").unwrap().trim();
+        let content = if content_part.starts_with('"') && content_part.ends_with('"') {
+            content_part[1..content_part.len()-1].to_string()
+        } else {
+            content_part.to_string()
+        };
+        
+        if let Some(file_node) = self.filesystem.resolve_path_mut(file_path) {
+            if file_node.file_type == crate::filesystem::FileType::File {
+                if file_node.permissions.can_write(user_id) {
+                    file_node.update_content(content)?;
+                    return Ok(format!("File updated: {}", file_path));
+                } else {
+                    return Err("Permission denied: cannot write to file".to_string());
+                }
+            } else {
+                return Err("Cannot write to directory".to_string());
+            }
+        } else {
+            match self.filesystem.create_file(file_path, content, user_id.to_string()) {
+                Ok(()) => Ok(format!("File created: {}", file_path)),
+                Err(e) => Err(e),
+            }
+        }
+    }
 
     fn generate_session_id(&self, user_address: &str) -> String {
         let timestamp = std::time::SystemTime::now()
@@ -323,6 +366,48 @@ mod tests {
         let result = coordinator.handle_authenticated_command(&cat_msg);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "Hello from ZatBoard!");
+    }
+
+    #[test]
+    fn test_echo_command() {
+        let mut coordinator = Coordinator::new(3600);
+        coordinator.verified_users.insert("zs1user123".to_string(), "zs1reply456".to_string());
+        coordinator.filesystem.root.permissions.add_write_permission("zs1user123".to_string());
+        
+        let echo_msg = Message::new(
+            "zs1user123".to_string(),
+            "zs1coordinator".to_string(),
+            "echo \"Hello ZatBoard!\" > /greeting.txt".to_string()
+        );
+        
+        let result = coordinator.handle_authenticated_command(&echo_msg);
+        assert!(result.is_ok());
+        assert!(result.unwrap().contains("File created"));
+        
+        let file = coordinator.filesystem.resolve_path("/greeting.txt").unwrap();
+        assert_eq!(file.content, Some("Hello ZatBoard!".to_string()));
+    }
+
+    #[test]
+    fn test_echo_update_existing_file() {
+        let mut coordinator = Coordinator::new(3600);
+        coordinator.verified_users.insert("zs1user123".to_string(), "zs1reply456".to_string());
+        coordinator.filesystem.root.permissions.add_write_permission("zs1user123".to_string());
+        
+        coordinator.filesystem.create_file("/update.txt", "old content".to_string(), "zs1user123".to_string()).unwrap();
+        
+        let echo_msg = Message::new(
+            "zs1user123".to_string(),
+            "zs1coordinator".to_string(),
+            "echo \"new content\" > /update.txt".to_string()
+        );
+        
+        let result = coordinator.handle_authenticated_command(&echo_msg);
+        assert!(result.is_ok());
+        assert!(result.unwrap().contains("File updated"));
+        
+        let file = coordinator.filesystem.resolve_path("/update.txt").unwrap();
+        assert_eq!(file.content, Some("new content".to_string()));
     }
 
 }
