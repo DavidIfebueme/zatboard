@@ -5,6 +5,7 @@ use crate::zingo_wrapper::ZingoClient;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use sha2::{Sha256, Digest};
+use std::time::{SystemTime, Duration};
 
 pub struct Coordinator {
     auth_flow: AuthenticationFlow,
@@ -14,6 +15,8 @@ pub struct Coordinator {
     pub filesystem: FileSystem,
     zingo_client: ZingoClient,
     db_path: PathBuf,
+    response_cache: HashMap<String, (String, SystemTime)>,
+    cache_duration: Duration,
 }
 
 impl Coordinator {
@@ -34,6 +37,23 @@ impl Coordinator {
             filesystem,
             zingo_client: ZingoClient::new(zingo_data_dir, zingo_server),
             db_path,
+            response_cache: HashMap::new(),
+            cache_duration: Duration::from_secs(10),
+        }
+    }
+
+    fn get_cached_response(&self, command: &str) -> Option<String> {
+        if let Some((response, timestamp)) = self.response_cache.get(command) {
+            if timestamp.elapsed().unwrap() < self.cache_duration {
+                return Some(response.clone());
+            }
+        }
+        None
+    }
+    
+    fn cache_response(&mut self, command: &str, response: &str) {
+        if command.starts_with("ls ") || command.starts_with("cat ") || command.starts_with("history ") {
+            self.response_cache.insert(command.to_string(), (response.to_string(), SystemTime::now()));
         }
     }
 
@@ -57,93 +77,88 @@ impl Coordinator {
     }
 
     fn handle_authenticated_command(&mut self, message: &Message) -> Result<String, String> {
+        if let Some(cached) = self.get_cached_response(&message.memo_text) {
+            return Ok(cached);
+        }
+
         let user_id = &message.sender_address;
 
-        if message.memo_text.starts_with("chmod ") {
+        let result = if message.memo_text.starts_with("chmod ") {
             let parts: Vec<&str> = message.memo_text.splitn(3, ' ').collect();
             if parts.len() >= 3 {
                 let permissions = parts[1];
                 let path = parts[2];
-                return self.handle_chmod_command(user_id, path, permissions);
+                self.handle_chmod_command(user_id, path, permissions)
+            } else {
+                Err("Invalid chmod format. Use: chmod <permissions> <path>".to_string())
             }
-            return Err("Invalid chmod format. Use: chmod <permissions> <path>".to_string());
-        }
-        
-        if message.memo_text.starts_with("chown ") {
+        } else if message.memo_text.starts_with("chown ") {
             let parts: Vec<&str> = message.memo_text.splitn(3, ' ').collect();
             if parts.len() >= 3 {
                 let new_owner = parts[1];
                 let path = parts[2];
-                return self.handle_chown_command(user_id, path, new_owner);
+                self.handle_chown_command(user_id, path, new_owner)
+            } else {
+                Err("Invalid chown format. Use: chown <user> <path>".to_string())
             }
-            return Err("Invalid chown format. Use: chown <user> <path>".to_string());
-        }
-        
-        if message.memo_text.starts_with("grant ") {
+        } else if message.memo_text.starts_with("grant ") {
             let parts: Vec<&str> = message.memo_text.splitn(4, ' ').collect();
             if parts.len() >= 4 {
                 let permission_type = parts[1];
                 let target_user = parts[2];
                 let path = parts[3];
-                return self.handle_grant_command(user_id, path, target_user, permission_type);
+                self.handle_grant_command(user_id, path, target_user, permission_type)
+            } else {
+                Err("Invalid grant format. Use: grant <read|write> <user> <path>".to_string())
             }
-            return Err("Invalid grant format. Use: grant <read|write> <user> <path>".to_string());
-        }
-        
-        if message.memo_text.starts_with("ls ") {
+        } else if message.memo_text.starts_with("ls ") {
             let path = message.memo_text.strip_prefix("ls ").unwrap_or("/");
-            return self.handle_ls_command(user_id, path);
-        }
-        
-        if message.memo_text.starts_with("cat ") {
+            self.handle_ls_command(user_id, path)
+        } else if message.memo_text.starts_with("cat ") {
             let path = message.memo_text.strip_prefix("cat ").unwrap();
-            return self.handle_cat_command(user_id, path);
-        }
-        
-        if message.memo_text.starts_with("mkdir ") {
+            self.handle_cat_command(user_id, path)
+        } else if message.memo_text.starts_with("mkdir ") {
             let path = message.memo_text.strip_prefix("mkdir ").unwrap();
-            return self.handle_mkdir_command(user_id, path);
-        }
-
-        if message.memo_text.starts_with("rm ") {
+            self.handle_mkdir_command(user_id, path)
+        } else if message.memo_text.starts_with("rm ") {
             let path = message.memo_text.strip_prefix("rm ").unwrap();
-            return self.handle_rm_command(user_id, path);
-        }
-
-        if message.memo_text.contains(" > ") {
-            return self.handle_echo_command(user_id, &message.memo_text);
-        }
-        
-        if message.memo_text.starts_with("touch ") {
+            self.handle_rm_command(user_id, path)
+        } else if message.memo_text.contains(" > ") {
+            self.handle_echo_command(user_id, &message.memo_text)
+        } else if message.memo_text.starts_with("touch ") {
             let parts: Vec<&str> = message.memo_text.splitn(3, ' ').collect();
             if parts.len() >= 2 {
                 let path = parts[1];
                 let content = if parts.len() == 3 { parts[2] } else { "" };
-                return self.handle_touch_command(user_id, path, content);
+                self.handle_touch_command(user_id, path, content)
+            } else {
+                Err("Invalid touch command".to_string())
             }
-        }
-
-        if message.memo_text.starts_with("permissions ") {
+        } else if message.memo_text.starts_with("permissions ") {
             let path = message.memo_text.strip_prefix("permissions ").unwrap();
-            return self.handle_permissions_command(user_id, path);
-        }
-
-        if message.memo_text.starts_with("chat ") {
+            self.handle_permissions_command(user_id, path)
+        } else if message.memo_text.starts_with("chat ") {
             let parts: Vec<&str> = message.memo_text.splitn(3, ' ').collect();
             if parts.len() >= 3 {
                 let folder = parts[1];
                 let chat_message = parts[2].trim_matches('"');
-                return self.handle_chat_command(user_id, folder, chat_message);
+                self.handle_chat_command(user_id, folder, chat_message)
+            } else {
+                Err("Invalid chat format. Use: chat <folder> \"message\"".to_string())
             }
-            return Err("Invalid chat format. Use: chat <folder> \"message\"".to_string());
-        }
-        
-        if message.memo_text.starts_with("history ") {
+        } else if message.memo_text.starts_with("history ") {
             let folder = message.memo_text.strip_prefix("history ").unwrap();
-            return self.handle_history_command(user_id, folder);
+            self.handle_history_command(user_id, folder)
+        } else {
+            Err("Unknown command. Try: ls, cat, mkdir, rm, echo, touch, chmod, chown, grant, chat, history".to_string())
+        };
+
+        if let Ok(ref response) = result {
+            self.cache_response(&message.memo_text, response);
         }
         
-        Err("Unknown command. Try: ls, cat, mkdir, rm, echo, touch, chmod, chown, grant, chat, history".to_string())
+        result
+        
     }
 
     fn handle_permissions_command(&self, user_id: &str, path: &str) -> Result<String, String> {
@@ -271,8 +286,13 @@ impl Coordinator {
     fn handle_mkdir_command(&mut self, user_id: &str, path: &str) -> Result<String, String> {
         match self.filesystem.create_directory(path, user_id.to_string()) {
             Ok(()) => {
-                self.save_filesystem()?;
-                Ok(format!("Directory created: {}", path))
+                let response = format!("Directory created: {}", path);
+                
+                if let Err(e) = self.save_filesystem() {
+                    eprintln!("Warning: Failed to persist filesystem: {}", e);
+                }
+                
+                Ok(response)
             }
             Err(e) => Err(e),
         }
@@ -502,7 +522,7 @@ impl Coordinator {
     }
 
     pub fn poll_for_new_messages(&mut self) -> Result<Vec<Message>, String> {
-        self.zingo_client.poll_for_messages(5, Some(1))
+        self.zingo_client.poll_for_messages(1, Some(3))
     }
 
 }

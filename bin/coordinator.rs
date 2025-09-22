@@ -9,7 +9,7 @@ fn main() {
     
     let mut coordinator = Coordinator::new(3600, zingo_data_dir, zingo_server);
     
-    println!("Coordinator ready. Will respond via Zcash memos...");
+    println!("Coordinator ready. Aggressive polling enabled for low latency...");
     
     loop {
         match coordinator.poll_for_new_messages() {
@@ -22,10 +22,10 @@ fn main() {
             }
             Err(e) => {
                 eprintln!("Error polling messages: {}", e);
-                std::thread::sleep(std::time::Duration::from_secs(10));
+                std::thread::sleep(std::time::Duration::from_secs(5));
             }
         }
         
-        std::thread::sleep(std::time::Duration::from_secs(5));
+        std::thread::sleep(std::time::Duration::from_secs(1));
     }
 }
