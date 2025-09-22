@@ -44,6 +44,37 @@ impl Coordinator {
 
     fn handle_authenticated_command(&mut self, message: &Message) -> Result<String, String> {
         let user_id = &message.sender_address;
+
+        if message.memo_text.starts_with("chmod ") {
+            let parts: Vec<&str> = message.memo_text.splitn(3, ' ').collect();
+            if parts.len() >= 3 {
+                let permissions = parts[1];
+                let path = parts[2];
+                return self.handle_chmod_command(user_id, path, permissions);
+            }
+            return Err("Invalid chmod format. Use: chmod <permissions> <path>".to_string());
+        }
+        
+        if message.memo_text.starts_with("chown ") {
+            let parts: Vec<&str> = message.memo_text.splitn(3, ' ').collect();
+            if parts.len() >= 3 {
+                let new_owner = parts[1];
+                let path = parts[2];
+                return self.handle_chown_command(user_id, path, new_owner);
+            }
+            return Err("Invalid chown format. Use: chown <user> <path>".to_string());
+        }
+        
+        if message.memo_text.starts_with("grant ") {
+            let parts: Vec<&str> = message.memo_text.splitn(4, ' ').collect();
+            if parts.len() >= 4 {
+                let permission_type = parts[1];
+                let target_user = parts[2];
+                let path = parts[3];
+                return self.handle_grant_command(user_id, path, target_user, permission_type);
+            }
+            return Err("Invalid grant format. Use: grant <read|write> <user> <path>".to_string());
+        }
         
         if message.memo_text.starts_with("ls ") {
             let path = message.memo_text.strip_prefix("ls ").unwrap_or("/");
@@ -77,10 +108,98 @@ impl Coordinator {
                 return self.handle_touch_command(user_id, path, content);
             }
         }
+
+        if message.memo_text.starts_with("permissions ") {
+            let path = message.memo_text.strip_prefix("permissions ").unwrap();
+            return self.handle_permissions_command(user_id, path);
+        }
         
-        Err("Unknown command. Try: ls <path>, cat <file>, mkdir <dir>, rm <path>, touch <file>, echo \"msg\" > <file>".to_string())
+        Err("Unknown command. Try: ls, cat, mkdir, rm, echo, touch, chmod, chown, grant".to_string())
     }
-    
+
+    fn handle_permissions_command(&self, user_id: &str, path: &str) -> Result<String, String> {
+        let node = self.filesystem.resolve_path(path)
+            .ok_or_else(|| format!("Path not found: {}", path))?;
+            
+        if !node.permissions.can_read(user_id) {
+            return Err("Permission denied: cannot view permissions".to_string());
+        }
+        
+        let mut result = format!("Permissions for {}:\n", path);
+        result.push_str(&format!("Owner: {}\n", node.permissions.owner));
+        result.push_str(&format!("Public read: {}\n", node.permissions.public_read));
+        result.push_str(&format!("Public write: {}\n", node.permissions.public_write));
+        result.push_str(&format!("Read users: {:?}\n", node.permissions.read_users));
+        result.push_str(&format!("Write users: {:?}", node.permissions.write_users));
+        
+        Ok(result)
+    }
+
+    fn handle_chmod_command(&mut self, user_id: &str, path: &str, permissions: &str) -> Result<String, String> {
+        let node = self.filesystem.resolve_path_mut(path)
+            .ok_or_else(|| format!("Path not found: {}", path))?;
+            
+        if node.permissions.owner != user_id {
+            return Err("Permission denied: only owner can change permissions".to_string());
+        }
+        
+        match permissions {
+            "public" => {
+                node.permissions.public_read = true;
+                node.permissions.public_write = false;
+            }
+            "private" => {
+                node.permissions.public_read = false;
+                node.permissions.public_write = false;
+            }
+            "open" => {
+                node.permissions.public_read = true;
+                node.permissions.public_write = true;
+            }
+            _ => return Err("Invalid permissions. Use: public, private, or open".to_string()),
+        }
+        
+        Ok(format!("Permissions updated for {}", path))
+    }
+
+    fn handle_chown_command(&mut self, user_id: &str, path: &str, new_owner: &str) -> Result<String, String> {
+        let node = self.filesystem.resolve_path_mut(path)
+            .ok_or_else(|| format!("Path not found: {}", path))?;
+            
+        if node.permissions.owner != user_id {
+            return Err("Permission denied: only owner can change ownership".to_string());
+        }
+        
+        node.permissions.owner = new_owner.to_string();
+        node.permissions.read_users.clear();
+        node.permissions.write_users.clear();
+        node.permissions.read_users.push(new_owner.to_string());
+        node.permissions.write_users.push(new_owner.to_string());
+        
+        Ok(format!("Ownership of {} transferred to {}", path, new_owner))
+    }
+
+    fn handle_grant_command(&mut self, user_id: &str, path: &str, target_user: &str, permission_type: &str) -> Result<String, String> {
+        let node = self.filesystem.resolve_path_mut(path)
+            .ok_or_else(|| format!("Path not found: {}", path))?;
+            
+        if node.permissions.owner != user_id {
+            return Err("Permission denied: only owner can grant permissions".to_string());
+        }
+        
+        match permission_type {
+            "read" => {
+                node.permissions.add_read_permission(target_user.to_string());
+                Ok(format!("Read permission granted to {} for {}", target_user, path))
+            }
+            "write" => {
+                node.permissions.add_write_permission(target_user.to_string());
+                Ok(format!("Write permission granted to {} for {}", target_user, path))
+            }
+            _ => Err("Invalid permission type. Use: read or write".to_string()),
+        }
+    }
+
     fn handle_ls_command(&self, user_id: &str, path: &str) -> Result<String, String> {
         let node = self.filesystem.resolve_path(path)
             .ok_or_else(|| format!("Path not found: {}", path))?;
@@ -276,7 +395,7 @@ impl Coordinator {
     pub fn poll_for_new_messages(&mut self) -> Result<Vec<Message>, String> {
         self.zingo_client.poll_for_messages(5, Some(1))
     }
-    
+
 }
 
 #[cfg(test)]
@@ -465,6 +584,56 @@ mod tests {
         
         let file = coordinator.filesystem.resolve_path("/update.txt").unwrap();
         assert_eq!(file.content, Some("new content".to_string()));
+    }
+
+    #[test]
+    fn test_chmod_command() {
+        let mut coordinator = Coordinator::new(
+            3600, 
+            PathBuf::from("/tmp/test"), 
+            "http://test:9067".to_string()
+        );
+        coordinator.verified_users.insert("zs1user123".to_string(), "zs1reply456".to_string());
+        coordinator.filesystem.root.permissions.add_write_permission("zs1user123".to_string());
+        coordinator.filesystem.create_file("/test.txt", "content".to_string(), "zs1user123".to_string()).unwrap();
+        
+        let chmod_msg = Message::new(
+            "zs1user123".to_string(),
+            "zs1coordinator".to_string(),
+            "chmod private /test.txt".to_string()
+        );
+        
+        let result = coordinator.handle_authenticated_command(&chmod_msg);
+        assert!(result.is_ok());
+        assert!(result.unwrap().contains("Permissions updated"));
+        
+        let file = coordinator.filesystem.resolve_path("/test.txt").unwrap();
+        assert!(!file.permissions.public_read);
+    }
+
+    #[test]
+    fn test_grant_command() {
+        let mut coordinator = Coordinator::new(
+            3600, 
+            PathBuf::from("/tmp/test"), 
+            "http://test:9067".to_string()
+        );
+        coordinator.verified_users.insert("zs1user123".to_string(), "zs1reply456".to_string());
+        coordinator.filesystem.root.permissions.add_write_permission("zs1user123".to_string());
+        coordinator.filesystem.create_file("/shared.txt", "content".to_string(), "zs1user123".to_string()).unwrap();
+        
+        let grant_msg = Message::new(
+            "zs1user123".to_string(),
+            "zs1coordinator".to_string(),
+            "grant read zs1other456 /shared.txt".to_string()
+        );
+        
+        let result = coordinator.handle_authenticated_command(&grant_msg);
+        assert!(result.is_ok());
+        assert!(result.unwrap().contains("Read permission granted"));
+        
+        let file = coordinator.filesystem.resolve_path("/shared.txt").unwrap();
+        assert!(file.permissions.can_read("zs1other456"));
     }
 
 }
