@@ -127,8 +127,23 @@ impl Coordinator {
             let path = message.memo_text.strip_prefix("permissions ").unwrap();
             return self.handle_permissions_command(user_id, path);
         }
+
+        if message.memo_text.starts_with("chat ") {
+            let parts: Vec<&str> = message.memo_text.splitn(3, ' ').collect();
+            if parts.len() >= 3 {
+                let folder = parts[1];
+                let chat_message = parts[2].trim_matches('"');
+                return self.handle_chat_command(user_id, folder, chat_message);
+            }
+            return Err("Invalid chat format. Use: chat <folder> \"message\"".to_string());
+        }
         
-        Err("Unknown command. Try: ls, cat, mkdir, rm, echo, touch, chmod, chown, grant".to_string())
+        if message.memo_text.starts_with("history ") {
+            let folder = message.memo_text.strip_prefix("history ").unwrap();
+            return self.handle_history_command(user_id, folder);
+        }
+        
+        Err("Unknown command. Try: ls, cat, mkdir, rm, echo, touch, chmod, chown, grant, chat, history".to_string())
     }
 
     fn handle_permissions_command(&self, user_id: &str, path: &str) -> Result<String, String> {
@@ -323,6 +338,69 @@ impl Coordinator {
                 }
                 Err(e) => Err(e),
             }
+        }
+    }
+
+    fn handle_chat_command(&mut self, user_id: &str, folder_path: &str, message: &str) -> Result<String, String> {
+        let folder_node = self.filesystem.resolve_path(folder_path)
+            .ok_or_else(|| format!("Folder not found: {}", folder_path))?;
+            
+        if folder_node.file_type != crate::filesystem::FileType::Directory {
+            return Err("Can only chat in directories".to_string());
+        }
+        
+        if !folder_node.permissions.can_read(user_id) {
+            return Err("Permission denied: cannot access chatroom".to_string());
+        }
+        
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+            
+        let chat_entry = format!("[{}] {}: {}", timestamp, self.get_user_display_name(user_id), message);
+        
+        let chat_log_path = format!("{}/.chat_log", folder_path.trim_end_matches('/'));
+        
+        if let Some(chat_file) = self.filesystem.resolve_path_mut(&chat_log_path) {
+            let current_content = chat_file.content.clone().unwrap_or_default();
+            let new_content = if current_content.is_empty() {
+                chat_entry
+            } else {
+                format!("{}\n{}", current_content, chat_entry)
+            };
+            chat_file.update_content(new_content)?;
+        } else {
+            self.filesystem.create_file(&chat_log_path, chat_entry, "coordinator".to_string())?;
+        }
+        
+        self.save_filesystem()?;
+        
+        Ok(format!("Message sent to chatroom: {}", folder_path))
+    }
+
+    fn handle_history_command(&self, user_id: &str, folder_path: &str) -> Result<String, String> {
+        let folder_node = self.filesystem.resolve_path(folder_path)
+            .ok_or_else(|| format!("Folder not found: {}", folder_path))?;
+            
+        if !folder_node.permissions.can_read(user_id) {
+            return Err("Permission denied: cannot access chatroom".to_string());
+        }
+
+        let chat_log_path = format!("{}/.chat_log", folder_path.trim_end_matches('/'));
+        
+        if let Some(chat_file) = self.filesystem.resolve_path(&chat_log_path) {
+            Ok(chat_file.content.clone().unwrap_or_else(|| "No chat history".to_string()))
+        } else {
+            Ok("No chat history in this folder yet. Start chatting!".to_string())
+        }
+    }
+
+    fn get_user_display_name(&self, user_id: &str) -> String {
+        if user_id.len() > 8 {
+            user_id[user_id.len()-8..].to_string()
+        } else {
+            user_id.to_string()
         }
     }
 
@@ -692,6 +770,90 @@ mod tests {
         
         let file = coordinator.filesystem.resolve_path("/shared.txt").unwrap();
         assert!(file.permissions.can_read("zs1other456"));
+    }
+
+    #[test]
+    fn test_chat_command() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        
+        let mut coordinator = Coordinator::new(
+            3600, 
+            temp_dir.path().to_path_buf(), 
+            "http://test:9067".to_string()
+        );
+        coordinator.verified_users.insert("zs1user123".to_string(), "zs1reply456".to_string());
+        
+        coordinator.filesystem.create_directory("/lobby", "coordinator".to_string()).unwrap();
+        
+        let chat_msg = Message::new(
+            "zs1user123".to_string(),
+            "zs1coordinator".to_string(),
+            "chat /lobby \"Hello everyone in the lobby!\"".to_string()
+        );
+        
+        let result = coordinator.handle_authenticated_command(&chat_msg);
+        assert!(result.is_ok());
+        assert!(result.unwrap().contains("Message sent to chatroom"));
+        
+        let chat_log = coordinator.filesystem.resolve_path("/lobby/.chat_log").unwrap();
+        assert!(chat_log.content.as_ref().unwrap().contains("Hello everyone in the lobby!"));
+    }
+
+    #[test]
+    fn test_chat_history_command() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        
+        let mut coordinator = Coordinator::new(
+            3600, 
+            temp_dir.path().to_path_buf(), 
+            "http://test:9067".to_string()
+        );
+        coordinator.verified_users.insert("zs1user123".to_string(), "zs1reply456".to_string());
+        coordinator.verified_users.insert("zs1user789".to_string(), "zs1reply000".to_string());
+        
+        coordinator.filesystem.create_directory("/general", "coordinator".to_string()).unwrap();
+        
+        let chat1 = Message::new("zs1user123".to_string(), "zs1coordinator".to_string(), "chat /general \"First message\"".to_string());
+        let chat2 = Message::new("zs1user789".to_string(), "zs1coordinator".to_string(), "chat /general \"Second message\"".to_string());
+        
+        coordinator.handle_authenticated_command(&chat1).unwrap();
+        coordinator.handle_authenticated_command(&chat2).unwrap();
+        
+        let history_msg = Message::new("zs1user123".to_string(), "zs1coordinator".to_string(), "history /general".to_string());
+        let result = coordinator.handle_authenticated_command(&history_msg);
+        
+        assert!(result.is_ok());
+        let history = result.unwrap();
+        assert!(history.contains("First message"));
+        assert!(history.contains("Second message"));
+        assert!(history.contains("ser123"));
+        assert!(history.contains("ser789"));
+    }
+
+    #[test]
+    fn test_chat_permissions() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        
+        let mut coordinator = Coordinator::new(
+            3600, 
+            temp_dir.path().to_path_buf(), 
+            "http://test:9067".to_string()
+        );
+        coordinator.verified_users.insert("zs1user123".to_string(), "zs1reply456".to_string());
+        
+        coordinator.filesystem.create_directory("/private", "coordinator".to_string()).unwrap();
+        let private_dir = coordinator.filesystem.resolve_path_mut("/private").unwrap();
+        private_dir.permissions.public_read = false;
+        
+        let chat_msg = Message::new(
+            "zs1user123".to_string(),
+            "zs1coordinator".to_string(),
+            "chat /private \"Secret message\"".to_string()
+        );
+        
+        let result = coordinator.handle_authenticated_command(&chat_msg);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Permission denied"));
     }
 
 }
