@@ -20,7 +20,6 @@ impl ZingoClient {
             .arg(&self.data_dir)
             .arg("--server")
             .arg(&self.server)
-            .arg("--command")
             .arg(cmd)
             .output()
             .map_err(|e| format!("Failed to execute zingo-cli: {}", e))?;
