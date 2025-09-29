@@ -2,12 +2,12 @@ use crate::message::Message;
 use crate::auth::AuthenticationFlow;
 use crate::filesystem::FileSystem;
 use crate::zingo_wrapper::ZingoClient;
-use std::collections::HashMap;
 use std::path::PathBuf;
 use sha2::{Sha256, Digest};
 use std::time::{SystemTime, Duration};
 use warp::Filter;
 use serde_json::{Value, json};
+use std::collections::{HashMap, HashSet}; 
 
 pub struct Coordinator {
     auth_flow: AuthenticationFlow,
@@ -19,6 +19,7 @@ pub struct Coordinator {
     db_path: PathBuf,
     response_cache: HashMap<String, (String, SystemTime)>,
     cache_duration: Duration,
+    processed_txids: HashSet<String>,
 }
 
 impl Coordinator {
@@ -41,6 +42,7 @@ impl Coordinator {
             db_path,
             response_cache: HashMap::new(),
             cache_duration: Duration::from_secs(10),
+            processed_txids: HashSet::new(),
         }
     }
 
@@ -65,8 +67,17 @@ impl Coordinator {
 
     pub fn send_response(&mut self, user_id: &str, response: &str) -> Result<(), String> {
         if let Some(reply_address) = self.get_reply_address(user_id) {
-            self.zingo_client.send_memo(&reply_address, 1000, response)?;
-            Ok(())
+            println!("📤 Sending response to {}: {}", &reply_address[..8], &response[..50]);
+            match self.zingo_client.send_memo(&reply_address, 0, response) {
+                Ok(result) => {
+                    println!("✅ Response sent successfully");
+                    Ok(())
+                }
+                Err(e) => {
+                    println!("❌ Send failed: {}", e);
+                    Err(format!("Failed to send response: {}", e))
+                }
+            }
         } else {
             Err("No reply address found for user".to_string())
         }
@@ -501,14 +512,17 @@ impl Coordinator {
         }
         
         let reply_address = parts[1].to_string();
-        let challenge = self.auth_flow.initiate_authentication(
-            message.sender_address.clone(),
-            reply_address.clone()
-        );
+
+        if self.verified_users.contains_key(&message.sender_address) {
+            return Ok("Already registered!".to_string());
+        }
+
+        self.verified_users.insert(message.sender_address.clone(), reply_address.clone());
+        println!("✅ New user registered: {} -> {}", 
+                &message.sender_address[..12], 
+                &reply_address[..12]);
         
-        self.pending_challenges.insert(message.sender_address.clone(), challenge.clone());
-        
-        Ok(format!("Registration initiated. Please sign and send: AUTH:{}", challenge))
+        Ok("Registration successful! You can now use filesystem commands.".to_string())
     }
     
     fn verify_sender_identity(&self, message: &Message) -> bool {
@@ -524,7 +538,34 @@ impl Coordinator {
     }
 
     pub fn poll_for_new_messages(&mut self) -> Result<Vec<Message>, String> {
-        self.zingo_client.poll_for_messages(1, Some(3))
+        let all_messages = self.zingo_client.poll_once()?;
+        
+        let mut new_messages = Vec::new();
+        let mut processed_count = 0;
+        
+        for msg in all_messages {
+            if let Some(ref txid) = msg.txid {
+                if self.processed_txids.contains(txid) {
+                    processed_count += 1;
+                    continue;
+                } else {
+                    self.processed_txids.insert(txid.clone());
+                    new_messages.push(msg);
+                }
+            } else {
+                new_messages.push(msg);
+            }
+        }
+        
+        if processed_count > 0 {
+            println!("⏭️  Skipped {} already processed messages", processed_count);
+        }
+        
+        if !new_messages.is_empty() {
+            println!("🆕 Processing {} new messages", new_messages.len());
+        }
+        
+        Ok(new_messages)
     }
 
     pub async fn start_json_rpc_server(&self, bind_address: String, port: u16) -> Result<(), String> {
@@ -590,7 +631,6 @@ impl Coordinator {
     }
     
     fn count_filesystem_nodes(&self) -> usize {
-        // Simple count of filesystem nodes for status
         1
     }
 

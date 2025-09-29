@@ -4,38 +4,46 @@ use sha2::{Sha256, Digest};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub sender_address: String,
-    pub recipient_address: String, 
+    pub recipient_address: String,
     pub memo_text: String,
-    pub signature: Option<String>,
-    pub timestamp: u64,
     pub txid: Option<String>,
+    pub signature: Option<String>,
+    pub timestamp: Option<u64>,
 }
 
 impl Message {
-    pub fn new(
-        sender: String,
-        recipient: String, 
-        memo: String
-    ) -> Self {
+     pub fn new(sender: String, recipient: String, memo: String) -> Self {
         Message {
             sender_address: sender,
             recipient_address: recipient,
             memo_text: memo,
-            signature: None,
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
             txid: None,
+            signature: None,     
+            timestamp: None,      
+        }
+    }
+    
+    pub fn with_txid(sender: String, recipient: String, memo: String, txid: String) -> Self {
+        Message {
+            sender_address: sender,
+            recipient_address: recipient,
+            memo_text: memo,
+            txid: Some(txid),
+            signature: None,    
+            timestamp: None,      
         }
     }
     
     fn create_signature_payload(&self) -> String {
+        let timestamp_str = self.timestamp
+            .map(|t| t.to_string())
+            .unwrap_or_else(|| "0".to_string());
+            
         format!("{}:{}:{}:{}", 
             self.sender_address,
             self.recipient_address, 
             self.memo_text,
-            self.timestamp
+            timestamp_str
         )
     }
     
@@ -70,6 +78,15 @@ impl Message {
     }
 }
 
+impl std::fmt::Display for Message {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Message from {} to {}: {}", 
+               self.sender_address, 
+               self.recipient_address, 
+               self.memo_text)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -83,7 +100,10 @@ mod tests {
         );
         
         assert_eq!(msg.memo_text, "ls /home");
-        assert!(msg.timestamp > 0);
+        assert_eq!(msg.sender_address, "zs1sender123");
+        assert_eq!(msg.recipient_address, "zs1recipient456");
+        assert!(msg.timestamp.is_none());  
+        assert!(msg.signature.is_none());
     }
     
     #[test]

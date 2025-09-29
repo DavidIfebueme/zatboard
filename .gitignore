@@ -5,3 +5,7 @@ target/
 Cargo.lock
 tasks.md
 coordinator.toml
+coordinator.log
+coordinator_data/
+coordinator-data/
+*.dat

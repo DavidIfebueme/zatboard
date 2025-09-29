@@ -1,7 +1,5 @@
 use std::process::Command;
 use std::path::PathBuf;
-use std::time::Duration;
-use std::thread;
 use crate::message::Message;
 
 pub struct ZingoClient {
@@ -20,6 +18,8 @@ impl ZingoClient {
             .arg(&self.data_dir)
             .arg("--server")
             .arg(&self.server)
+            .arg("--chain")
+            .arg("testnet")
             .arg(cmd)
             .output()
             .map_err(|e| format!("Failed to execute zingo-cli: {}", e))?;
@@ -37,8 +37,19 @@ impl ZingoClient {
     }
     
     pub fn send_memo(&self, address: &str, amount_zatoshis: u64, memo: &str) -> Result<String, String> {
-        let cmd = format!("quicksend {} {} \"{}\"", address, amount_zatoshis, memo);
-        self.execute_command(&cmd)
+        let cmd = format!("quicksend {} 0 \"{}\"", address, memo);
+        println!("DEBUG: Executing send command: {}", cmd);
+
+        match self.execute_command(&cmd) {
+            Ok(output) => {
+                println!("DEBUG: Send result: {}", output);
+                Ok(output)
+            }
+            Err(e) => {
+                println!("DEBUG: Send failed: {}", e);
+                Err(e)
+            }
+        }
     }
 
     pub fn send_memo_zec(&self, address: &str, amount_zec: f64, memo: &str) -> Result<String, String> {
@@ -51,36 +62,85 @@ impl ZingoClient {
         self.parse_messages(&response)
     }
     
-    fn parse_messages(&self, _raw_data: &str) -> Result<Vec<Message>, String> {
-        let messages = vec![];
-        Ok(messages)
-    }
-    
-    pub fn poll_for_messages(&self, interval_secs: u64, max_iterations: Option<u32>) -> Result<Vec<Message>, String> {
-        let mut iterations = 0;
+    fn parse_messages(&self, raw_data: &str) -> Result<Vec<Message>, String> {
+        let json_start = raw_data.find('{');
+        let json_end = raw_data.rfind('}');
         
-        loop {
-            self.execute_command("sync")?;
+        if let (Some(start), Some(end)) = (json_start, json_end) {
+            let json_str = &raw_data[start..=end];
             
-            match self.get_messages() {
-                Ok(messages) if !messages.is_empty() => return Ok(messages),
-                Ok(_) => {
-                    if let Some(max) = max_iterations {
-                        iterations += 1;
-                        if iterations >= max {
-                            return Ok(vec![]);
+            match serde_json::from_str::<serde_json::Value>(json_str) {
+                Ok(json) => {
+                    let mut messages = Vec::new();
+                    
+                    if let Some(transfers) = json.get("value_transfers").and_then(|v| v.as_array()) {
+                        for transfer in transfers {
+                            let txid = transfer.get("txid")
+                                .and_then(|t| t.as_str())
+                                .unwrap_or("unknown_txid")
+                                .to_string();
+                                
+                            if let Some(memos) = transfer.get("memos").and_then(|m| m.as_array()) {
+                                for memo in memos {
+                                    if let Some(memo_text) = memo.as_str() {
+                                        if !memo_text.is_empty() && !memo_text.contains("ZecFaucet") {
+                                            let sender = format!("client_{}", &txid[..8]);
+                                            
+                                            let message = Message::with_txid(
+                                                sender,
+                                                "coordinator".to_string(),
+                                                memo_text.to_string(),
+                                                txid.clone()
+                                            );
+                                            messages.push(message);
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
-                    thread::sleep(Duration::from_secs(interval_secs));
-                    continue;
+                    
+                    if !messages.is_empty() {
+                        println!("📨 Found {} messages", messages.len());
+                    }
+                    Ok(messages)
                 }
-                Err(e) => return Err(e),
+                Err(_e) => Ok(vec![])
             }
+        } else {
+            Ok(vec![])
         }
     }
+        
+    // pub fn poll_for_new_messages(&mut self) -> Result<Vec<Message>, String> {
+    //     let all_messages = self.zingo_client.poll_for_messages(1, Some(3))?;
+
+    //     let new_messages: Vec<Message> = all_messages.into_iter()
+    //         .filter(|msg| {
+    //             if let Some(ref txid) = msg.txid {
+    //                 if self.processed_txids.contains(txid) {
+    //                     false  
+    //                 } else {
+    //                     self.processed_txids.insert(txid.clone()); 
+    //                     true  
+    //                 }
+    //             } else {
+    //                 true 
+    //             }
+    //         })
+    //         .collect();
+        
+    //     if !new_messages.is_empty() {
+    //         println!("🆕 Processing {} new messages (filtered from {})", 
+    //                 new_messages.len(), 
+    //                 new_messages.len() + self.processed_txids.len());
+    //     }
+        
+    //     Ok(new_messages)
+    // }
     
     pub fn poll_once(&self) -> Result<Vec<Message>, String> {
-        self.execute_command("sync")?;
+        self.execute_command("sync run")?;
         self.get_messages()
     }
 }

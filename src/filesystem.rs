@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use rusqlite::{Connection, Result as SqlResult};
+use rusqlite::Connection;
 use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -493,7 +493,7 @@ impl FileSystem {
             for child_result in child_rows {
                 let (child_path, child_name) = child_result.map_err(|e| format!("Child row error: {}", e))?;
                 if let Some(child_node) = Self::load_node_recursive(conn, &child_path, &child_name)? {
-                    node.children.insert(child_name, child_node);
+                    node.children.insert(child_name.to_string(), child_node);
                 }
             }
         }

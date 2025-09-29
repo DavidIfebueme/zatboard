@@ -37,14 +37,20 @@ async fn main() {
     loop {
         match coordinator.poll_for_new_messages() {
             Ok(messages) => {
+                if messages.is_empty() {
+                    std::thread::sleep(std::time::Duration::from_secs(5));
+                    continue;
+                }
+                
                 for message in messages {
-                    if let Err(e) = coordinator.process_and_respond(&message) {
-                        eprintln!("Error processing message: {}", e);
+                    match coordinator.process_and_respond(&message) {
+                        Ok(()) => println!("📤 Message processed successfully"),
+                        Err(e) => eprintln!("❌ Error processing message: {}", e),
                     }
                 }
             }
             Err(e) => {
-                eprintln!("Error polling messages: {}", e);
+                eprintln!("⚠️  Error polling messages: {}", e);
                 std::thread::sleep(std::time::Duration::from_secs(5));
             }
         }
