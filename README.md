@@ -68,7 +68,7 @@ It is designed to feel like a hybrid between a filesystem and a BBS (bulletin bo
 
 #### CLI Client
 
-- Written in Rust (or Python for faster prototyping).
+- Written in Rust
 - Handles: command parsing, memo construction, reply address management.
 
 #### Coordinator Service
