@@ -87,18 +87,9 @@ It is designed to feel like a hybrid between a filesystem and a BBS (bulletin bo
 - A `lightwalletd`-backed client is sufficient for development (no need to run a full node initially).
 - Full nodes are optional but improve resilience.
 
-**Disk requirements:**
-- Light client: minimal (~GBs).
-- Full node: heavier (hundreds of GBs).
-
----
-
-## Testing
-
-- Use Zcash Testnet to avoid costs during development.
 
 **Workflow:**
-1. Spin up test addresses.
+1. Spin up addresses.
 2. Send memos back and forth.
 3. Simulate directories and chat.
 4. Once stable, deploy to mainnet with real ZEC micro-payments.
@@ -126,6 +117,20 @@ It is designed to feel like a hybrid between a filesystem and a BBS (bulletin bo
 - Backend still powered by Zcash memos.
 
 ---
+
+## Steps to Run
+
+### as coordinator
+- clone the repo
+- ensure *cargo* and *rust* are installed
+- ensure *zingo cli* is installed and set up on a chosen data dir
+- mkdir a *coordinator.toml* and edit your data dir.
+- run the cooridnator daemon by *cargo run --bin zatboard-coordinator*
+
+### as client/user
+- same first three steps as coordinator
+- run the client process *cargo run --bin zatboard*
+
 
 ## Name & Identity
 
