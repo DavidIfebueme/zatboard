@@ -137,6 +137,9 @@ It is designed to feel like a hybrid between a filesystem and a BBS (bulletin bo
 - **Project Name:** ZatBoard
 - **Meaning:** Zcash Addressed Text Bulletin Board
 - **Tagline:** "A private filesystem and message board built on Zcash."
+- **Author** @sableapathy
+
+
 
 
 nb: still in development
