@@ -24,12 +24,6 @@ It is designed to feel like a hybrid between a filesystem and a BBS (bulletin bo
 - **Solution:** Users attach a persistent reply-to shielded address and digitally sign their first message.
 - Coordinators (directory managers) then know where to send responses.
 
-### Chain Latency
-
-- Zcash block time ≈ 75 seconds.
-- For commands (e.g., `ls folder`), aggressive local polling and buffering are used so responses appear quickly.
-- For chats, the delay is embraced — branding them as asynchronous private message boards.
-
 ---
 
 ## Features
@@ -142,4 +136,4 @@ It is designed to feel like a hybrid between a filesystem and a BBS (bulletin bo
 
 
 
-nb: still in development
+**nb**: still in development
