@@ -7,5 +7,6 @@ tasks.md
 coordinator.toml
 coordinator.log
 coordinator_data/
+client_data/
 coordinator-data/
 *.dat

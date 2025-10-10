@@ -100,9 +100,9 @@ impl ZingoClient {
                         }
                     }
                     
-                    if !messages.is_empty() {
-                        println!("📨 Found {} messages", messages.len());
-                    }
+                    // if !messages.is_empty() {
+                    //     println!("📨 Found {} messages", messages.len());
+                    // }
                     Ok(messages)
                 }
                 Err(_e) => Ok(vec![])

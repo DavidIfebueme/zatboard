@@ -14,6 +14,10 @@ pub struct Coordinator {
     verified_users: HashMap<String, String>,
     pending_challenges: HashMap<String, String>,
     session_mappings: HashMap<String, String>,
+    conversation_mappings: HashMap<String, String>,
+    user_conversations: HashMap<String, String>,
+    participant_mappings: HashMap<String, String>,
+    conversation_counter: u32,
     pub filesystem: FileSystem,
     zingo_client: ZingoClient,
     db_path: PathBuf,
@@ -37,6 +41,10 @@ impl Coordinator {
             verified_users: HashMap::new(),
             pending_challenges: HashMap::new(),
             session_mappings: HashMap::new(),
+            conversation_mappings: HashMap::new(),
+            user_conversations: HashMap::new(),
+            participant_mappings: HashMap::new(),
+            conversation_counter: 1000,
             filesystem,
             zingo_client: ZingoClient::new(zingo_data_dir, zingo_server),
             db_path,
@@ -44,6 +52,18 @@ impl Coordinator {
             cache_duration: Duration::from_secs(10),
             processed_txids: HashSet::new(),
         }
+    }
+
+    fn generate_conversation_id(&mut self) -> String {
+        self.conversation_counter += 1;
+        format!("CONV{:04}", self.conversation_counter)
+    }
+    
+    fn generate_participant_id(&self, user_address: &str) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(user_address.as_bytes());
+        hasher.update(b"zatboard_participant");
+        format!("P{}", &format!("{:x}", hasher.finalize())[..6].to_uppercase())
     }
 
     fn get_cached_response(&self, command: &str) -> Option<String> {
@@ -69,7 +89,7 @@ impl Coordinator {
         if let Some(reply_address) = self.get_reply_address(user_id) {
             println!("📤 Sending response to {}: {}", &reply_address[..8], &response[..50]);
             match self.zingo_client.send_memo(&reply_address, 0, response) {
-                Ok(result) => {
+                Ok(_result) => {
                     println!("✅ Response sent successfully");
                     Ok(())
                 }
@@ -488,6 +508,24 @@ impl Coordinator {
         self.auth_flow.cleanup_expired_sessions();
         // TODO: Also cleanup session_mappings based on expiry
     }
+
+    fn parse_command_with_ids(&self, memo_text: &str) -> Option<(String, String, String)> {
+        let parts: Vec<&str> = memo_text.splitn(3, ':').collect();
+        if parts.len() == 3 {
+            let conv_id = parts[0];
+            let part_id = parts[1]; 
+            let command = parts[2];
+            
+            if let Some(user_address) = self.conversation_mappings.get(conv_id) {
+                if let Some(mapped_address) = self.participant_mappings.get(part_id) {
+                    if user_address == mapped_address {
+                        return Some((user_address.clone(), conv_id.to_string(), command.to_string()));
+                    }
+                }
+            }
+        }
+        None
+    }
     
     pub fn process_incoming_message(&mut self, message: &Message) -> Result<String, String> {
         if message.memo_text.starts_with("REGISTER:") {
@@ -496,6 +534,22 @@ impl Coordinator {
         
         if message.memo_text.starts_with("AUTH:") {
             return self.handle_authentication(message);
+        }
+        
+        if let Some((user_address, _conv_id, command)) = self.parse_command_with_ids(&message.memo_text) {
+            if self.verified_users.contains_key(&user_address) {
+                let synthetic_message = Message {
+                    sender_address: user_address,
+                    recipient_address: message.recipient_address.clone(),
+                    memo_text: command,
+                    signature: Some("conv_id_auth".to_string()),
+                    txid: message.txid.clone(),
+                    timestamp: message.timestamp,
+                };
+                return self.handle_authenticated_command(&synthetic_message);
+            } else {
+                return Err("Invalid conversation ID - user not registered".to_string());
+            }
         }
         
         if self.verify_sender_identity(message) {
@@ -514,15 +568,26 @@ impl Coordinator {
         let reply_address = parts[1].to_string();
 
         if self.verified_users.contains_key(&message.sender_address) {
+            let _conv_id = self.user_conversations.get(&message.sender_address).unwrap();
+            let _part_id = self.generate_participant_id(&message.sender_address);
             return Ok("Already registered!".to_string());
         }
 
+        let conversation_id = self.generate_conversation_id();
+        let participant_id = self.generate_participant_id(&message.sender_address);
+    
         self.verified_users.insert(message.sender_address.clone(), reply_address.clone());
+        self.conversation_mappings.insert(conversation_id.clone(), message.sender_address.clone());
+        self.user_conversations.insert(message.sender_address.clone(), conversation_id.clone());
+        self.participant_mappings.insert(participant_id.clone(), message.sender_address.clone());
+    
         println!("✅ New user registered: {} -> {}", 
                 &message.sender_address[..12], 
                 &reply_address[..12]);
         
-        Ok("Registration successful! You can now use filesystem commands.".to_string())
+        println!("   ConvID: {} | PartID: {}", conversation_id, participant_id);
+    
+        Ok(format!("Registration successful! ConvID: {} PartID: {} - Save these for future commands.", conversation_id, participant_id))
     }
     
     fn verify_sender_identity(&self, message: &Message) -> bool {
@@ -541,12 +606,12 @@ impl Coordinator {
         let all_messages = self.zingo_client.poll_once()?;
         
         let mut new_messages = Vec::new();
-        let mut processed_count = 0;
+        let mut _processed_count = 0;
         
         for msg in all_messages {
             if let Some(ref txid) = msg.txid {
                 if self.processed_txids.contains(txid) {
-                    processed_count += 1;
+                    _processed_count += 1;
                     continue;
                 } else {
                     self.processed_txids.insert(txid.clone());
@@ -557,16 +622,12 @@ impl Coordinator {
             }
         }
         
-        if processed_count > 0 {
-            println!("⏭️  Skipped {} already processed messages", processed_count);
-        }
-        
         if !new_messages.is_empty() {
-            println!("🆕 Processing {} new messages", new_messages.len());
+            println!("📨 Found {} new messages", new_messages.len());
         }
         
         Ok(new_messages)
-    }
+    } 
 
     pub async fn start_json_rpc_server(&self, bind_address: String, port: u16) -> Result<(), String> {
         let coordinator_data = self.get_coordinator_status();
@@ -659,7 +720,7 @@ mod tests {
         
         let result = coordinator.process_incoming_message(&register_msg);
         assert!(result.is_ok());
-        assert!(result.unwrap().contains("AUTH:"));
+        assert!(result.unwrap().contains("Registration successful!"));
     }
 
     #[test]
