@@ -1,5 +1,6 @@
 use zatboard::zingo_wrapper::ZingoClient;
 use zatboard::message::Message;
+use zatboard::coordinator::Coordinator;
 use std::path::PathBuf;
 
 #[test]
@@ -58,4 +59,84 @@ fn test_memo_command_formats() {
         assert!(!message.memo_text.is_empty());
         assert!(message.memo_text.len() <= 512);
     }
+}
+
+#[test]
+fn test_registration_and_authentication_flow() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let mut coordinator = Coordinator::new(
+        3600,
+        temp_dir.path().to_path_buf(),
+        "https://example.com:9067".to_string(),
+    );
+
+    let register = Message::new(
+        "zs1sender123".to_string(),
+        "zs1coordinator456".to_string(),
+        "REGISTER:zs1reply123".to_string(),
+    );
+    let register_response = coordinator.process_incoming_message(&register).unwrap();
+    assert!(register_response.contains("Registration successful!"));
+    assert!(register_response.contains("AUTH_CHALLENGE:"));
+
+    let challenge = register_response
+        .split("AUTH_CHALLENGE:")
+        .nth(1)
+        .unwrap()
+        .split(' ')
+        .next()
+        .unwrap()
+        .to_string();
+
+    let mut auth = Message::new(
+        "zs1sender123".to_string(),
+        "zs1coordinator456".to_string(),
+        format!("AUTH:{}", challenge),
+    );
+    auth.signature = Some("sig".to_string());
+
+    let auth_response = coordinator.process_incoming_message(&auth).unwrap();
+    assert!(auth_response.contains("Authentication successful"));
+}
+
+#[test]
+fn test_conversation_id_command_flow() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let mut coordinator = Coordinator::new(
+        3600,
+        temp_dir.path().to_path_buf(),
+        "https://example.com:9067".to_string(),
+    );
+
+    let register = Message::new(
+        "zs1sender123".to_string(),
+        "zs1coordinator456".to_string(),
+        "REGISTER:zs1reply123".to_string(),
+    );
+    let register_response = coordinator.process_incoming_message(&register).unwrap();
+
+    let conv_id = register_response
+        .split("ConvID: ")
+        .nth(1)
+        .unwrap()
+        .split(' ')
+        .next()
+        .unwrap()
+        .to_string();
+    let part_id = register_response
+        .split("PartID: ")
+        .nth(1)
+        .unwrap()
+        .split(' ')
+        .next()
+        .unwrap()
+        .to_string();
+
+    let command = Message::new(
+        "zs1sender123".to_string(),
+        "zs1coordinator456".to_string(),
+        format!("{}:{}:ls /", conv_id, part_id),
+    );
+    let response = coordinator.process_incoming_message(&command).unwrap();
+    assert!(response.contains("(empty directory)"));
 }

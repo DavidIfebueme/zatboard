@@ -10,3 +10,4 @@ coordinator_data/
 client_data/
 coordinator-data/
 *.dat
+RELEASE_TODO.md
