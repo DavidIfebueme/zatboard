@@ -1,6 +1,10 @@
 use std::env;
+use std::fs;
 use std::path::PathBuf;
+use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
+use std::path::Path;
 use zatboard::message::Message;
 use zatboard::zingo_wrapper::ZingoClient;
 
@@ -9,11 +13,31 @@ struct CliConfig {
     server: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+struct ClientState {
+    coordinator: Option<String>,
+    reply_address: Option<String>,
+    conversation_id: Option<String>,
+    participant_id: Option<String>,
+}
+
 enum UserCommand {
-    Connect { coordinator: String },
-    Register { coordinator: String, reply_address: String },
-    Auth { coordinator: String, challenge: String, signature: String },
-    Command { coordinator: String, memo: String },
+    Connect {
+        coordinator: String,
+    },
+    Register {
+        coordinator: String,
+        reply_address: String,
+    },
+    Auth {
+        coordinator: String,
+        challenge: String,
+        signature: String,
+    },
+    Command {
+        coordinator: String,
+        memo: String,
+    },
     Poll,
 }
 
@@ -22,11 +46,58 @@ impl CliConfig {
         let data_dir = env::var("ZATBOARD_DATA_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("./client_data"));
-        let server = env::var("ZATBOARD_SERVER")
-            .unwrap_or_else(|_| "http://127.0.0.1:9067".to_string());
+        let server =
+            env::var("ZATBOARD_SERVER").unwrap_or_else(|_| "http://127.0.0.1:9067".to_string());
 
         Self { data_dir, server }
     }
+}
+
+fn client_state_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("client_state.json")
+}
+
+fn load_client_state(data_dir: &Path) -> Result<ClientState, String> {
+    let state_path = client_state_path(data_dir);
+    if !state_path.exists() {
+        return Ok(ClientState::default());
+    }
+
+    let raw = fs::read_to_string(&state_path)
+        .map_err(|e| format!("Failed to read client state: {}", e))?;
+    serde_json::from_str::<ClientState>(&raw)
+        .map_err(|e| format!("Failed to parse client state: {}", e))
+}
+
+fn save_client_state(data_dir: &Path, state: &ClientState) -> Result<(), String> {
+    fs::create_dir_all(data_dir).map_err(|e| format!("Failed to create client data dir: {}", e))?;
+
+    let state_path = client_state_path(data_dir);
+    let raw = serde_json::to_string_pretty(state)
+        .map_err(|e| format!("Failed to serialize client state: {}", e))?;
+    fs::write(state_path, raw).map_err(|e| format!("Failed to write client state: {}", e))
+}
+
+fn poll_with_retry(
+    client: &ZingoClient,
+    attempts: u8,
+    delay_ms: u64,
+) -> Result<Vec<Message>, String> {
+    let mut last_error = None;
+
+    for attempt in 1..=attempts.max(1) {
+        match client.poll_once() {
+            Ok(messages) => return Ok(messages),
+            Err(e) => {
+                last_error = Some(e);
+                if attempt < attempts.max(1) {
+                    std::thread::sleep(Duration::from_millis(delay_ms));
+                }
+            }
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| "Polling failed".to_string()))
 }
 
 fn usage() -> &'static str {
@@ -49,7 +120,9 @@ fn parse_cli(args: &[String]) -> Result<UserCommand, String> {
         }
         "register" => {
             if args.len() != 4 {
-                return Err("Usage: zatboard register <coordinator_address> <reply_address>".to_string());
+                return Err(
+                    "Usage: zatboard register <coordinator_address> <reply_address>".to_string(),
+                );
             }
             Ok(UserCommand::Register {
                 coordinator: args[2].clone(),
@@ -58,7 +131,10 @@ fn parse_cli(args: &[String]) -> Result<UserCommand, String> {
         }
         "auth" => {
             if args.len() != 5 {
-                return Err("Usage: zatboard auth <coordinator_address> <challenge> <signature>".to_string());
+                return Err(
+                    "Usage: zatboard auth <coordinator_address> <challenge> <signature>"
+                        .to_string(),
+                );
             }
             Ok(UserCommand::Auth {
                 coordinator: args[2].clone(),
@@ -68,7 +144,9 @@ fn parse_cli(args: &[String]) -> Result<UserCommand, String> {
         }
         "command" => {
             if args.len() < 4 {
-                return Err("Usage: zatboard command <coordinator_address> <memo_command>".to_string());
+                return Err(
+                    "Usage: zatboard command <coordinator_address> <memo_command>".to_string(),
+                );
             }
             Ok(UserCommand::Command {
                 coordinator: args[2].clone(),
@@ -90,7 +168,9 @@ fn sender_address(client: &ZingoClient) -> Result<String, String> {
     addresses
         .into_iter()
         .find(|addr| !addr.trim().is_empty())
-        .ok_or_else(|| "No wallet address found. Ensure zingo-cli wallet is initialized".to_string())
+        .ok_or_else(|| {
+            "No wallet address found. Ensure zingo-cli wallet is initialized".to_string()
+        })
 }
 
 fn build_register_memo(reply_address: &str) -> String {
@@ -118,9 +198,12 @@ fn run() -> Result<(), String> {
     let command = parse_cli(&args)?;
     let config = CliConfig::from_env();
     let client = ZingoClient::new(config.data_dir, config.server);
+    let mut state = load_client_state(client.data_dir.as_path())?;
 
     match command {
         UserCommand::Connect { coordinator } => {
+            state.coordinator = Some(coordinator.clone());
+            save_client_state(client.data_dir.as_path(), &state)?;
             println!("Connected target set to {}", coordinator);
             Ok(())
         }
@@ -136,6 +219,11 @@ fn run() -> Result<(), String> {
                 build_register_memo(&reply_address),
                 None,
             )?;
+
+            state.coordinator = Some(coordinator);
+            state.reply_address = Some(reply_address);
+            save_client_state(client.data_dir.as_path(), &state)?;
+
             println!("{}", result.trim());
             Ok(())
         }
@@ -157,12 +245,17 @@ fn run() -> Result<(), String> {
         }
         UserCommand::Command { coordinator, memo } => {
             let sender = sender_address(&client)?;
-            let result = send_user_message(&client, sender, &coordinator, memo, Some("sig".to_string()))?;
+            let result =
+                send_user_message(&client, sender, &coordinator, memo, Some("sig".to_string()))?;
             println!("{}", result.trim());
             Ok(())
         }
         UserCommand::Poll => {
-            let messages = client.poll_once()?;
+            println!("Polling for new messages...");
+            let messages = poll_with_retry(&client, 3, 500)?;
+            if messages.is_empty() {
+                println!("No new messages.");
+            }
             for msg in messages {
                 println!("{}", msg);
             }
@@ -275,5 +368,33 @@ mod tests {
     fn test_build_auth_memo() {
         let memo = build_auth_memo("challenge");
         assert_eq!(memo, "AUTH:challenge");
+    }
+
+    #[test]
+    fn test_state_path() {
+        let path = client_state_path(PathBuf::from("/tmp/zat-test").as_path());
+        assert!(path.ends_with("client_state.json"));
+    }
+
+    #[test]
+    fn test_state_roundtrip() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = ClientState {
+            coordinator: Some("zs1coord".to_string()),
+            reply_address: Some("zs1reply".to_string()),
+            conversation_id: None,
+            participant_id: None,
+        };
+
+        save_client_state(temp_dir.path(), &state).unwrap();
+        let loaded = load_client_state(temp_dir.path()).unwrap();
+        assert_eq!(loaded, state);
+    }
+
+    #[test]
+    fn test_load_state_default_when_missing() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let loaded = load_client_state(temp_dir.path()).unwrap();
+        assert_eq!(loaded, ClientState::default());
     }
 }

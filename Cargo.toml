@@ -2,6 +2,12 @@
 name = "zatboard"
 version = "0.1.0"
 edition = "2021"
+description = "Private filesystem-style bulletin board and chat over Zcash memos"
+license = "MIT"
+repository = "https://github.com/DavidIfebueme/zatboard"
+readme = "README.md"
+keywords = ["zcash", "memo", "cli", "chat", "filesystem"]
+categories = ["command-line-utilities", "cryptography", "network-programming"]
 
 [[bin]]
 name = "zatboard"

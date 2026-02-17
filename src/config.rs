@@ -90,21 +90,19 @@ impl CoordinatorConfig {
 
         let content = std::fs::read_to_string(path)
             .map_err(|e| format!("Failed to read config file: {}", e))?;
-            
-        toml::from_str(&content)
-            .map_err(|e| format!("Failed to parse config file: {}", e))
+
+        toml::from_str(&content).map_err(|e| format!("Failed to parse config file: {}", e))
     }
-    
+
     pub fn save_to_file(&self, path: &PathBuf) -> Result<(), String> {
         let content = toml::to_string_pretty(self)
             .map_err(|e| format!("Failed to serialize config: {}", e))?;
-            
+
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("Failed to create config directory: {}", e))?;
         }
-        
-        std::fs::write(path, content)
-            .map_err(|e| format!("Failed to write config file: {}", e))
+
+        std::fs::write(path, content).map_err(|e| format!("Failed to write config file: {}", e))
     }
 }

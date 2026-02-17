@@ -1,13 +1,16 @@
-use crate::message::Message;
 use crate::auth::AuthenticationFlow;
 use crate::filesystem::FileSystem;
+use crate::message::Message;
 use crate::zingo_wrapper::ZingoClient;
+use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use sha2::{Sha256, Digest};
-use std::time::{SystemTime, Duration};
+use std::time::{Duration, SystemTime};
 use warp::Filter;
-use serde_json::{Value, json};
-use std::collections::{HashMap, HashSet}; 
+
+const MAX_PROCESSED_TXIDS: usize = 5000;
+const MAX_RESPONSE_CACHE: usize = 1000;
 
 pub struct Coordinator {
     auth_flow: AuthenticationFlow,
@@ -28,8 +31,24 @@ pub struct Coordinator {
 
 impl Coordinator {
     pub fn new(session_timeout: u64, zingo_data_dir: PathBuf, zingo_server: String) -> Self {
-        let db_path = zingo_data_dir.join("filesystem.db");
-        
+        Self::new_with_options(
+            session_timeout,
+            zingo_data_dir,
+            zingo_server,
+            "filesystem.db".to_string(),
+            10,
+        )
+    }
+
+    pub fn new_with_options(
+        session_timeout: u64,
+        zingo_data_dir: PathBuf,
+        zingo_server: String,
+        database_file: String,
+        cache_ttl_secs: u64,
+    ) -> Self {
+        let db_path = zingo_data_dir.join(database_file);
+
         let filesystem = FileSystem::load_from_db(&db_path, "coordinator".to_string())
             .unwrap_or_else(|e| {
                 eprintln!("Warning: Could not load filesystem from database: {}", e);
@@ -49,7 +68,7 @@ impl Coordinator {
             zingo_client: ZingoClient::new(zingo_data_dir, zingo_server),
             db_path,
             response_cache: HashMap::new(),
-            cache_duration: Duration::from_secs(10),
+            cache_duration: Duration::from_secs(cache_ttl_secs.max(1)),
             processed_txids: HashSet::new(),
         }
     }
@@ -58,12 +77,15 @@ impl Coordinator {
         self.conversation_counter += 1;
         format!("CONV{:04}", self.conversation_counter)
     }
-    
+
     fn generate_participant_id(&self, user_address: &str) -> String {
         let mut hasher = Sha256::new();
         hasher.update(user_address.as_bytes());
         hasher.update(b"zatboard_participant");
-        format!("P{}", &format!("{:x}", hasher.finalize())[..6].to_uppercase())
+        format!(
+            "P{}",
+            &format!("{:x}", hasher.finalize())[..6].to_uppercase()
+        )
     }
 
     fn truncate_for_log(value: &str, max_chars: usize) -> String {
@@ -78,10 +100,47 @@ impl Coordinator {
         }
         None
     }
-    
+
     fn cache_response(&mut self, command: &str, response: &str) {
-        if command.starts_with("ls ") || command.starts_with("cat ") || command.starts_with("history ") {
-            self.response_cache.insert(command.to_string(), (response.to_string(), SystemTime::now()));
+        if command.starts_with("ls ")
+            || command.starts_with("cat ")
+            || command.starts_with("history ")
+        {
+            self.prune_response_cache();
+            self.response_cache.insert(
+                command.to_string(),
+                (response.to_string(), SystemTime::now()),
+            );
+        }
+    }
+
+    fn prune_response_cache(&mut self) {
+        if self.response_cache.len() < MAX_RESPONSE_CACHE {
+            return;
+        }
+
+        self.response_cache.retain(|_, (_, ts)| {
+            ts.elapsed().unwrap_or(Duration::from_secs(0)) < self.cache_duration
+        });
+
+        if self.response_cache.len() >= MAX_RESPONSE_CACHE {
+            let mut by_age: Vec<(String, SystemTime)> = self
+                .response_cache
+                .iter()
+                .map(|(cmd, (_, ts))| (cmd.clone(), *ts))
+                .collect();
+            by_age.sort_by_key(|(_, ts)| *ts);
+
+            let remove_count = self.response_cache.len() - (MAX_RESPONSE_CACHE - 1);
+            for (key, _) in by_age.into_iter().take(remove_count) {
+                self.response_cache.remove(&key);
+            }
+        }
+    }
+
+    fn prune_processed_txids(&mut self) {
+        if self.processed_txids.len() >= MAX_PROCESSED_TXIDS {
+            self.processed_txids.clear();
         }
     }
 
@@ -93,7 +152,10 @@ impl Coordinator {
         if let Some(reply_address) = self.get_reply_address(user_id) {
             let reply_preview = Self::truncate_for_log(&reply_address, 8);
             let response_preview = Self::truncate_for_log(response, 50);
-            println!("📤 Sending response to {}: {}", reply_preview, response_preview);
+            println!(
+                "📤 Sending response to {}: {}",
+                reply_preview, response_preview
+            );
             match self.zingo_client.send_memo(&reply_address, 0, response) {
                 Ok(_result) => {
                     println!("✅ Response sent successfully");
@@ -195,37 +257,48 @@ impl Coordinator {
         if let Ok(ref response) = result {
             self.cache_response(&message.memo_text, response);
         }
-        
+
         result
-        
     }
 
     fn handle_permissions_command(&self, user_id: &str, path: &str) -> Result<String, String> {
-        let node = self.filesystem.resolve_path(path)
+        let node = self
+            .filesystem
+            .resolve_path(path)
             .ok_or_else(|| format!("Path not found: {}", path))?;
-            
+
         if !node.permissions.can_read(user_id) {
             return Err("Permission denied: cannot view permissions".to_string());
         }
-        
+
         let mut result = format!("Permissions for {}:\n", path);
         result.push_str(&format!("Owner: {}\n", node.permissions.owner));
         result.push_str(&format!("Public read: {}\n", node.permissions.public_read));
-        result.push_str(&format!("Public write: {}\n", node.permissions.public_write));
+        result.push_str(&format!(
+            "Public write: {}\n",
+            node.permissions.public_write
+        ));
         result.push_str(&format!("Read users: {:?}\n", node.permissions.read_users));
         result.push_str(&format!("Write users: {:?}", node.permissions.write_users));
-        
+
         Ok(result)
     }
 
-    fn handle_chmod_command(&mut self, user_id: &str, path: &str, permissions: &str) -> Result<String, String> {
-        let node = self.filesystem.resolve_path_mut(path)
+    fn handle_chmod_command(
+        &mut self,
+        user_id: &str,
+        path: &str,
+        permissions: &str,
+    ) -> Result<String, String> {
+        let node = self
+            .filesystem
+            .resolve_path_mut(path)
             .ok_or_else(|| format!("Path not found: {}", path))?;
-            
+
         if node.permissions.owner != user_id {
             return Err("Permission denied: only owner can change permissions".to_string());
         }
-        
+
         match permissions {
             "public" => {
                 node.permissions.public_read = true;
@@ -246,14 +319,21 @@ impl Coordinator {
         Ok(format!("Permissions updated for {}", path))
     }
 
-    fn handle_chown_command(&mut self, user_id: &str, path: &str, new_owner: &str) -> Result<String, String> {
-        let node = self.filesystem.resolve_path_mut(path)
+    fn handle_chown_command(
+        &mut self,
+        user_id: &str,
+        path: &str,
+        new_owner: &str,
+    ) -> Result<String, String> {
+        let node = self
+            .filesystem
+            .resolve_path_mut(path)
             .ok_or_else(|| format!("Path not found: {}", path))?;
-            
+
         if node.permissions.owner != user_id {
             return Err("Permission denied: only owner can change ownership".to_string());
         }
-        
+
         node.permissions.owner = new_owner.to_string();
         node.permissions.read_users.clear();
         node.permissions.write_users.clear();
@@ -261,44 +341,65 @@ impl Coordinator {
         node.permissions.write_users.push(new_owner.to_string());
 
         self.save_filesystem()?;
-        Ok(format!("Ownership of {} transferred to {}", path, new_owner))
+        Ok(format!(
+            "Ownership of {} transferred to {}",
+            path, new_owner
+        ))
     }
 
-    fn handle_grant_command(&mut self, user_id: &str, path: &str, target_user: &str, permission_type: &str) -> Result<String, String> {
-        let node = self.filesystem.resolve_path_mut(path)
+    fn handle_grant_command(
+        &mut self,
+        user_id: &str,
+        path: &str,
+        target_user: &str,
+        permission_type: &str,
+    ) -> Result<String, String> {
+        let node = self
+            .filesystem
+            .resolve_path_mut(path)
             .ok_or_else(|| format!("Path not found: {}", path))?;
-            
+
         if node.permissions.owner != user_id {
             return Err("Permission denied: only owner can grant permissions".to_string());
         }
-        
+
         match permission_type {
             "read" => {
-                node.permissions.add_read_permission(target_user.to_string());
-                self.save_filesystem()?; 
-                Ok(format!("Read permission granted to {} for {}", target_user, path))
+                node.permissions
+                    .add_read_permission(target_user.to_string());
+                self.save_filesystem()?;
+                Ok(format!(
+                    "Read permission granted to {} for {}",
+                    target_user, path
+                ))
             }
             "write" => {
-                node.permissions.add_write_permission(target_user.to_string());
+                node.permissions
+                    .add_write_permission(target_user.to_string());
                 self.save_filesystem()?;
-                Ok(format!("Write permission granted to {} for {}", target_user, path))
+                Ok(format!(
+                    "Write permission granted to {} for {}",
+                    target_user, path
+                ))
             }
             _ => Err("Invalid permission type. Use: read or write".to_string()),
         }
     }
 
     fn handle_ls_command(&self, user_id: &str, path: &str) -> Result<String, String> {
-        let node = self.filesystem.resolve_path(path)
+        let node = self
+            .filesystem
+            .resolve_path(path)
             .ok_or_else(|| format!("Path not found: {}", path))?;
-            
+
         if !node.permissions.can_read(user_id) {
             return Err("Permission denied: cannot read directory".to_string());
         }
-        
+
         if node.file_type != crate::filesystem::FileType::Directory {
             return Err("Not a directory".to_string());
         }
-        
+
         let listing = node.list_children();
         if listing.is_empty() {
             Ok("(empty directory)".to_string())
@@ -306,39 +407,52 @@ impl Coordinator {
             Ok(listing.join("  "))
         }
     }
-    
+
     fn handle_cat_command(&self, user_id: &str, path: &str) -> Result<String, String> {
-        let node = self.filesystem.resolve_path(path)
+        let node = self
+            .filesystem
+            .resolve_path(path)
             .ok_or_else(|| format!("File not found: {}", path))?;
-            
+
         if !node.permissions.can_read(user_id) {
             return Err("Permission denied: cannot read file".to_string());
         }
-        
+
         if node.file_type != crate::filesystem::FileType::File {
             return Err("Not a file".to_string());
         }
-        
-        Ok(node.content.clone().unwrap_or_else(|| "(empty file)".to_string()))
+
+        Ok(node
+            .content
+            .clone()
+            .unwrap_or_else(|| "(empty file)".to_string()))
     }
-    
+
     fn handle_mkdir_command(&mut self, user_id: &str, path: &str) -> Result<String, String> {
         match self.filesystem.create_directory(path, user_id.to_string()) {
             Ok(()) => {
                 let response = format!("Directory created: {}", path);
-                
+
                 if let Err(e) = self.save_filesystem() {
                     eprintln!("Warning: Failed to persist filesystem: {}", e);
                 }
-                
+
                 Ok(response)
             }
             Err(e) => Err(e),
         }
     }
-    
-    fn handle_touch_command(&mut self, user_id: &str, path: &str, content: &str) -> Result<String, String> {
-        match self.filesystem.create_file(path, content.to_string(), user_id.to_string()) {
+
+    fn handle_touch_command(
+        &mut self,
+        user_id: &str,
+        path: &str,
+        content: &str,
+    ) -> Result<String, String> {
+        match self
+            .filesystem
+            .create_file(path, content.to_string(), user_id.to_string())
+        {
             Ok(()) => {
                 self.save_filesystem()?;
                 Ok(format!("File created: {}", path))
@@ -362,35 +476,38 @@ impl Coordinator {
         if parts.len() != 2 {
             return Err("Invalid echo format. Use: echo \"content\" > <file>".to_string());
         }
-        
+
         let echo_part = parts[0].trim();
         let file_path = parts[1].trim();
-        
+
         if !echo_part.starts_with("echo ") {
             return Err("Command must start with 'echo'".to_string());
         }
-        
+
         let content_part = echo_part.strip_prefix("echo ").unwrap().trim();
         let content = if content_part.starts_with('"') && content_part.ends_with('"') {
-            content_part[1..content_part.len()-1].to_string()
+            content_part[1..content_part.len() - 1].to_string()
         } else {
             content_part.to_string()
         };
-        
+
         if let Some(file_node) = self.filesystem.resolve_path_mut(file_path) {
             if file_node.file_type == crate::filesystem::FileType::File {
                 if file_node.permissions.can_write(user_id) {
                     file_node.update_content(content)?;
-                    self.save_filesystem()?; 
-                    return Ok(format!("File updated: {}", file_path));
+                    self.save_filesystem()?;
+                    Ok(format!("File updated: {}", file_path))
                 } else {
-                    return Err("Permission denied: cannot write to file".to_string());
+                    Err("Permission denied: cannot write to file".to_string())
                 }
             } else {
-                return Err("Cannot write to directory".to_string());
+                Err("Cannot write to directory".to_string())
             }
         } else {
-            match self.filesystem.create_file(file_path, content, user_id.to_string()) {
+            match self
+                .filesystem
+                .create_file(file_path, content, user_id.to_string())
+            {
                 Ok(()) => {
                     self.save_filesystem()?;
                     Ok(format!("File created: {}", file_path))
@@ -400,27 +517,39 @@ impl Coordinator {
         }
     }
 
-    fn handle_chat_command(&mut self, user_id: &str, folder_path: &str, message: &str) -> Result<String, String> {
-        let folder_node = self.filesystem.resolve_path(folder_path)
+    fn handle_chat_command(
+        &mut self,
+        user_id: &str,
+        folder_path: &str,
+        message: &str,
+    ) -> Result<String, String> {
+        let folder_node = self
+            .filesystem
+            .resolve_path(folder_path)
             .ok_or_else(|| format!("Folder not found: {}", folder_path))?;
-            
+
         if folder_node.file_type != crate::filesystem::FileType::Directory {
             return Err("Can only chat in directories".to_string());
         }
-        
+
         if !folder_node.permissions.can_read(user_id) {
             return Err("Permission denied: cannot access chatroom".to_string());
         }
-        
+
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-            
-        let chat_entry = format!("[{}] {}: {}", timestamp, self.get_user_display_name(user_id), message);
-        
+
+        let chat_entry = format!(
+            "[{}] {}: {}",
+            timestamp,
+            self.get_user_display_name(user_id),
+            message
+        );
+
         let chat_log_path = format!("{}/.chat_log", folder_path.trim_end_matches('/'));
-        
+
         if let Some(chat_file) = self.filesystem.resolve_path_mut(&chat_log_path) {
             let current_content = chat_file.content.clone().unwrap_or_default();
             let new_content = if current_content.is_empty() {
@@ -430,26 +559,32 @@ impl Coordinator {
             };
             chat_file.update_content(new_content)?;
         } else {
-            self.filesystem.create_file(&chat_log_path, chat_entry, "coordinator".to_string())?;
+            self.filesystem
+                .create_file(&chat_log_path, chat_entry, "coordinator".to_string())?;
         }
-        
+
         self.save_filesystem()?;
-        
+
         Ok(format!("Message sent to chatroom: {}", folder_path))
     }
 
     fn handle_history_command(&self, user_id: &str, folder_path: &str) -> Result<String, String> {
-        let folder_node = self.filesystem.resolve_path(folder_path)
+        let folder_node = self
+            .filesystem
+            .resolve_path(folder_path)
             .ok_or_else(|| format!("Folder not found: {}", folder_path))?;
-            
+
         if !folder_node.permissions.can_read(user_id) {
             return Err("Permission denied: cannot access chatroom".to_string());
         }
 
         let chat_log_path = format!("{}/.chat_log", folder_path.trim_end_matches('/'));
-        
+
         if let Some(chat_file) = self.filesystem.resolve_path(&chat_log_path) {
-            Ok(chat_file.content.clone().unwrap_or_else(|| "No chat history".to_string()))
+            Ok(chat_file
+                .content
+                .clone()
+                .unwrap_or_else(|| "No chat history".to_string()))
         } else {
             Ok("No chat history in this folder yet. Start chatting!".to_string())
         }
@@ -457,7 +592,7 @@ impl Coordinator {
 
     fn get_user_display_name(&self, user_id: &str) -> String {
         if user_id.len() > 8 {
-            user_id[user_id.len()-8..].to_string()
+            user_id[user_id.len() - 8..].to_string()
         } else {
             user_id.to_string()
         }
@@ -484,67 +619,94 @@ impl Coordinator {
         }
 
         let provided_challenge = parts[1];
-        
+
         if let Some(expected_challenge) = self.pending_challenges.get(&message.sender_address) {
             if expected_challenge == provided_challenge && message.signature.is_some() {
                 let session_id = self.generate_session_id(&message.sender_address);
-                
-                let reply_address = self.auth_flow.session_manager
+
+                let reply_address = self
+                    .auth_flow
+                    .session_manager
                     .get_reply_address(&message.sender_address)
                     .unwrap_or_else(|| message.sender_address.clone());
-                
-                self.verified_users.insert(message.sender_address.clone(), reply_address.clone());
-                self.session_mappings.insert(session_id.clone(), reply_address);
+
+                self.verified_users
+                    .insert(message.sender_address.clone(), reply_address.clone());
+                self.session_mappings
+                    .insert(session_id.clone(), reply_address);
                 self.pending_challenges.remove(&message.sender_address);
-                
-                return Ok(format!("Authentication successful. Session ID: {}", session_id));
+
+                return Ok(format!(
+                    "Authentication successful. Session ID: {}",
+                    session_id
+                ));
             }
         }
-        
+
         Err("Authentication failed. Invalid signature or challenge.".to_string())
     }
-    
+
     pub fn get_reply_address_by_session(&self, session_id: &str) -> Option<String> {
         self.session_mappings.get(session_id).cloned()
     }
-    
+
     pub fn get_all_sessions(&self) -> &HashMap<String, String> {
         &self.session_mappings
     }
-    
+
     pub fn cleanup_expired_sessions(&mut self) {
         self.auth_flow.cleanup_expired_sessions();
-        // TODO: Also cleanup session_mappings based on expiry
+        let active_addresses: HashSet<String> = self
+            .auth_flow
+            .session_manager
+            .active_reply_addresses()
+            .into_iter()
+            .collect();
+
+        self.session_mappings
+            .retain(|_, reply_address| active_addresses.contains(reply_address));
+
+        self.verified_users
+            .retain(|_, reply_address| active_addresses.contains(reply_address));
+
+        self.pending_challenges
+            .retain(|user, _| self.auth_flow.session_manager.get_session(user).is_some());
     }
 
     fn parse_command_with_ids(&self, memo_text: &str) -> Option<(String, String, String)> {
         let parts: Vec<&str> = memo_text.splitn(3, ':').collect();
         if parts.len() == 3 {
             let conv_id = parts[0];
-            let part_id = parts[1]; 
+            let part_id = parts[1];
             let command = parts[2];
-            
+
             if let Some(user_address) = self.conversation_mappings.get(conv_id) {
                 if let Some(mapped_address) = self.participant_mappings.get(part_id) {
                     if user_address == mapped_address {
-                        return Some((user_address.clone(), conv_id.to_string(), command.to_string()));
+                        return Some((
+                            user_address.clone(),
+                            conv_id.to_string(),
+                            command.to_string(),
+                        ));
                     }
                 }
             }
         }
         None
     }
-    
+
     pub fn process_incoming_message(&mut self, message: &Message) -> Result<String, String> {
         if message.memo_text.starts_with("REGISTER:") {
             return self.handle_registration(message);
         }
-        
+
         if message.memo_text.starts_with("AUTH:") {
             return self.handle_authentication(message);
         }
-        
-        if let Some((user_address, _conv_id, command)) = self.parse_command_with_ids(&message.memo_text) {
+
+        if let Some((user_address, _conv_id, command)) =
+            self.parse_command_with_ids(&message.memo_text)
+        {
             if self.verified_users.contains_key(&user_address) {
                 let synthetic_message = Message {
                     sender_address: user_address,
@@ -559,55 +721,65 @@ impl Coordinator {
                 return Err("Invalid conversation ID - user not registered".to_string());
             }
         }
-        
+
         if self.verify_sender_identity(message) {
             self.handle_authenticated_command(message)
         } else {
             Err("Authentication required. Send REGISTER:<reply_address> first.".to_string())
         }
     }
-    
+
     fn handle_registration(&mut self, message: &Message) -> Result<String, String> {
         let parts: Vec<&str> = message.memo_text.splitn(2, ':').collect();
         if parts.len() != 2 {
             return Err("Invalid registration format. Use REGISTER:<reply_address>".to_string());
         }
-        
+
         let reply_address = parts[1].to_string();
 
         if self.verified_users.contains_key(&message.sender_address) {
-            let _conv_id = self.user_conversations.get(&message.sender_address).unwrap();
+            let _conv_id = self
+                .user_conversations
+                .get(&message.sender_address)
+                .unwrap();
             let _part_id = self.generate_participant_id(&message.sender_address);
             return Ok("Already registered!".to_string());
         }
 
         let conversation_id = self.generate_conversation_id();
         let participant_id = self.generate_participant_id(&message.sender_address);
-    
-        self.verified_users.insert(message.sender_address.clone(), reply_address.clone());
-        self.conversation_mappings.insert(conversation_id.clone(), message.sender_address.clone());
-        self.user_conversations.insert(message.sender_address.clone(), conversation_id.clone());
-        self.participant_mappings.insert(participant_id.clone(), message.sender_address.clone());
 
-        let challenge = self.auth_flow.initiate_authentication(
-            message.sender_address.clone(),
-            reply_address.clone(),
-        );
+        self.verified_users
+            .insert(message.sender_address.clone(), reply_address.clone());
+        self.conversation_mappings
+            .insert(conversation_id.clone(), message.sender_address.clone());
+        self.user_conversations
+            .insert(message.sender_address.clone(), conversation_id.clone());
+        self.participant_mappings
+            .insert(participant_id.clone(), message.sender_address.clone());
+
+        let challenge = self
+            .auth_flow
+            .initiate_authentication(message.sender_address.clone(), reply_address.clone());
         let challenge_value = challenge
             .strip_prefix("AUTH_CHALLENGE:")
             .unwrap_or("")
             .to_string();
         self.pending_challenges
             .insert(message.sender_address.clone(), challenge_value.clone());
-    
+
         let sender_preview = Self::truncate_for_log(&message.sender_address, 12);
         let reply_preview = Self::truncate_for_log(&reply_address, 12);
-        println!("✅ New user registered: {} -> {}", 
-                sender_preview, 
-                reply_preview);
-        
-        println!("   ConvID: {} | PartID: {}", conversation_id, participant_id);
-    
+        println!(
+            "✅ New user registered: {} -> {}",
+            sender_preview, reply_preview
+        );
+
+        println!(
+            "   ConvID: {} | PartID: {}",
+            conversation_id, participant_id
+        );
+
         Ok(format!(
             "Registration successful! ConvID: {} PartID: {} AUTH_CHALLENGE:{} - Save these for future commands.",
             conversation_id,
@@ -615,25 +787,26 @@ impl Coordinator {
             challenge_value
         ))
     }
-    
+
     fn verify_sender_identity(&self, message: &Message) -> bool {
         self.verified_users.contains_key(&message.sender_address) && message.signature.is_some()
     }
-    
+
     pub fn get_reply_address(&self, user_id: &str) -> Option<String> {
         self.verified_users.get(user_id).cloned()
     }
-    
+
     pub fn is_user_verified(&self, user_id: &str) -> bool {
         self.verified_users.contains_key(user_id)
     }
 
     pub fn poll_for_new_messages(&mut self) -> Result<Vec<Message>, String> {
         let all_messages = self.zingo_client.poll_once()?;
-        
+        self.prune_processed_txids();
+
         let mut new_messages = Vec::new();
         let mut _processed_count = 0;
-        
+
         for msg in all_messages {
             if let Some(ref txid) = msg.txid {
                 if self.processed_txids.contains(txid) {
@@ -647,23 +820,25 @@ impl Coordinator {
                 new_messages.push(msg);
             }
         }
-        
+
         if !new_messages.is_empty() {
             println!("📨 Found {} new messages", new_messages.len());
         }
-        
-        Ok(new_messages)
-    } 
 
-    pub async fn start_json_rpc_server(&self, bind_address: String, port: u16) -> Result<(), String> {
+        Ok(new_messages)
+    }
+
+    pub async fn start_json_rpc_server(
+        &self,
+        bind_address: String,
+        port: u16,
+    ) -> Result<(), String> {
         let coordinator_data = self.get_coordinator_status();
-        
+
         let status_route = warp::path("status")
             .and(warp::get())
-            .map(move || {
-                warp::reply::json(&coordinator_data)
-            });
-            
+            .map(move || warp::reply::json(&coordinator_data));
+
         let filesystem_route = warp::path("filesystem")
             .and(warp::path::param::<String>())
             .and(warp::get())
@@ -676,7 +851,7 @@ impl Coordinator {
                 });
                 warp::reply::json(&response)
             });
-            
+
         let chat_route = warp::path("chat")
             .and(warp::path::param::<String>())
             .and(warp::get())
@@ -691,21 +866,19 @@ impl Coordinator {
                 });
                 warp::reply::json(&response)
             });
-            
+
         let routes = status_route
             .or(filesystem_route)
             .or(chat_route)
             .with(warp::cors().allow_any_origin());
-            
+
         println!("JSON-RPC server starting on {}:{}", bind_address, port);
-        
-        warp::serve(routes)
-            .run(([127, 0, 0, 1], port))
-            .await;
-            
+
+        warp::serve(routes).run(([127, 0, 0, 1], port)).await;
+
         Ok(())
     }
-    
+
     fn get_coordinator_status(&self) -> Value {
         json!({
             "status": "running",
@@ -716,33 +889,32 @@ impl Coordinator {
             "version": "0.1.0"
         })
     }
-    
+
     fn count_filesystem_nodes(&self) -> usize {
         1
     }
-
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_coordinator_registration() {
         let temp_dir = tempfile::tempdir().unwrap();
 
         let mut coordinator = Coordinator::new(
-            3600, 
-            temp_dir.path().to_path_buf(), 
-            "http://test:9067".to_string()
+            3600,
+            temp_dir.path().to_path_buf(),
+            "http://test:9067".to_string(),
         );
-        
+
         let register_msg = Message::new(
             "zs1user123".to_string(),
             "zs1coordinator456".to_string(),
-            "REGISTER:zs1reply789".to_string()
+            "REGISTER:zs1reply789".to_string(),
         );
-        
+
         let result = coordinator.process_incoming_message(&register_msg);
         assert!(result.is_ok());
         assert!(result.unwrap().contains("Registration successful!"));
@@ -793,49 +965,103 @@ mod tests {
     }
 
     #[test]
+    fn test_cleanup_expired_sessions_removes_mappings() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut coordinator = Coordinator::new(
+            0,
+            temp_dir.path().to_path_buf(),
+            "http://test:9067".to_string(),
+        );
+
+        let register_msg = Message::new(
+            "zs1user123".to_string(),
+            "zs1coordinator456".to_string(),
+            "REGISTER:zs1reply789".to_string(),
+        );
+        coordinator.process_incoming_message(&register_msg).unwrap();
+
+        let expected = coordinator
+            .pending_challenges
+            .get("zs1user123")
+            .unwrap()
+            .clone();
+        let mut auth_msg = Message::new(
+            "zs1user123".to_string(),
+            "zs1coordinator456".to_string(),
+            format!("AUTH:{}", expected),
+        );
+        auth_msg.signature = Some("sig".to_string());
+        coordinator.process_incoming_message(&auth_msg).unwrap();
+
+        assert!(!coordinator.get_all_sessions().is_empty());
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        coordinator.cleanup_expired_sessions();
+        assert!(coordinator.get_all_sessions().is_empty());
+        assert!(!coordinator.is_user_verified("zs1user123"));
+    }
+
+    #[test]
     fn test_ls_command() {
         let temp_dir = tempfile::tempdir().unwrap();
-        
+
         let mut coordinator = Coordinator::new(
-            3600, 
-            temp_dir.path().to_path_buf(), 
-            "http://test:9067".to_string()
+            3600,
+            temp_dir.path().to_path_buf(),
+            "http://test:9067".to_string(),
         );
-        
-        coordinator.filesystem.create_directory("/home", "coordinator".to_string()).unwrap();
-        coordinator.filesystem.create_file("/home/readme.txt", "Hello!".to_string(), "coordinator".to_string()).unwrap();
-        
-        coordinator.verified_users.insert("zs1user123".to_string(), "zs1reply456".to_string());
-        
+
+        coordinator
+            .filesystem
+            .create_directory("/home", "coordinator".to_string())
+            .unwrap();
+        coordinator
+            .filesystem
+            .create_file(
+                "/home/readme.txt",
+                "Hello!".to_string(),
+                "coordinator".to_string(),
+            )
+            .unwrap();
+
+        coordinator
+            .verified_users
+            .insert("zs1user123".to_string(), "zs1reply456".to_string());
+
         let ls_msg = Message::new(
             "zs1user123".to_string(),
             "zs1coordinator".to_string(),
-            "ls /home".to_string()
+            "ls /home".to_string(),
         );
-        
+
         let result = coordinator.handle_authenticated_command(&ls_msg);
         assert!(result.is_ok());
         assert!(result.unwrap().contains("readme.txt"));
     }
-    
+
     #[test]
     fn test_mkdir_command() {
         let temp_dir = tempfile::tempdir().unwrap();
 
         let mut coordinator = Coordinator::new(
-            3600, 
-            temp_dir.path().to_path_buf(), 
-            "http://test:9067".to_string()
+            3600,
+            temp_dir.path().to_path_buf(),
+            "http://test:9067".to_string(),
         );
-        coordinator.verified_users.insert("zs1user123".to_string(), "zs1reply456".to_string());
-        coordinator.filesystem.root.permissions.add_write_permission("zs1user123".to_string());
-    
+        coordinator
+            .verified_users
+            .insert("zs1user123".to_string(), "zs1reply456".to_string());
+        coordinator
+            .filesystem
+            .root
+            .permissions
+            .add_write_permission("zs1user123".to_string());
+
         let mkdir_msg = Message::new(
             "zs1user123".to_string(),
             "zs1coordinator".to_string(),
-            "mkdir /test_dir".to_string()
+            "mkdir /test_dir".to_string(),
         );
-        
+
         let result = coordinator.handle_authenticated_command(&mkdir_msg);
 
         if let Err(e) = &result {
@@ -852,72 +1078,96 @@ mod tests {
     #[test]
     fn test_rm_command() {
         let temp_dir = tempfile::tempdir().unwrap();
-        
+
         let mut coordinator = Coordinator::new(
-            3600, 
-            temp_dir.path().to_path_buf(), 
-            "http://test:9067".to_string()
+            3600,
+            temp_dir.path().to_path_buf(),
+            "http://test:9067".to_string(),
         );
-        coordinator.verified_users.insert("zs1user123".to_string(), "zs1reply456".to_string()); 
-        coordinator.filesystem.root.permissions.add_write_permission("zs1user123".to_string());
-        coordinator.filesystem.create_file("/test.txt", "content".to_string(), "zs1user123".to_string()).unwrap();
-        
+        coordinator
+            .verified_users
+            .insert("zs1user123".to_string(), "zs1reply456".to_string());
+        coordinator
+            .filesystem
+            .root
+            .permissions
+            .add_write_permission("zs1user123".to_string());
+        coordinator
+            .filesystem
+            .create_file("/test.txt", "content".to_string(), "zs1user123".to_string())
+            .unwrap();
+
         let rm_msg = Message::new(
             "zs1user123".to_string(),
             "zs1coordinator".to_string(),
-            "rm /test.txt".to_string()
+            "rm /test.txt".to_string(),
         );
-        
+
         let result = coordinator.handle_authenticated_command(&rm_msg);
         assert!(result.is_ok());
         assert!(coordinator.filesystem.resolve_path("/test.txt").is_none());
     }
-    
+
     #[test]
     fn test_touch_command() {
         let temp_dir = tempfile::tempdir().unwrap();
-        
+
         let mut coordinator = Coordinator::new(
-            3600, 
-            temp_dir.path().to_path_buf(), 
-            "http://test:9067".to_string()
+            3600,
+            temp_dir.path().to_path_buf(),
+            "http://test:9067".to_string(),
         );
-        coordinator.verified_users.insert("zs1user123".to_string(), "zs1reply456".to_string());
-        coordinator.filesystem.root.permissions.add_write_permission("zs1user123".to_string());
-        
+        coordinator
+            .verified_users
+            .insert("zs1user123".to_string(), "zs1reply456".to_string());
+        coordinator
+            .filesystem
+            .root
+            .permissions
+            .add_write_permission("zs1user123".to_string());
+
         let touch_msg = Message::new(
             "zs1user123".to_string(),
             "zs1coordinator".to_string(),
-            "touch /newfile.txt Hello World!".to_string()
+            "touch /newfile.txt Hello World!".to_string(),
         );
-        
+
         let result = coordinator.handle_authenticated_command(&touch_msg);
         assert!(result.is_ok());
         assert!(result.unwrap().contains("File created"));
-        
+
         let file = coordinator.filesystem.resolve_path("/newfile.txt").unwrap();
         assert_eq!(file.content, Some("Hello World!".to_string()));
     }
-    
+
     #[test]
     fn test_cat_command() {
         let temp_dir = tempfile::tempdir().unwrap();
-        
+
         let mut coordinator = Coordinator::new(
-            3600, 
-            temp_dir.path().to_path_buf(), 
-            "http://test:9067".to_string()
+            3600,
+            temp_dir.path().to_path_buf(),
+            "http://test:9067".to_string(),
         );
-        coordinator.verified_users.insert("zs1user123".to_string(), "zs1reply456".to_string());
-        
-        coordinator.filesystem.create_file("/readme.txt", "Hello from ZatBoard!".to_string(), "coordinator".to_string()).unwrap();
-        
+        coordinator
+            .verified_users
+            .insert("zs1user123".to_string(), "zs1reply456".to_string());
+
+        coordinator
+            .filesystem
+            .create_file(
+                "/readme.txt",
+                "Hello from ZatBoard!".to_string(),
+                "coordinator".to_string(),
+            )
+            .unwrap();
+
         let cat_msg = Message::new(
             "zs1user123".to_string(),
             "zs1coordinator".to_string(),
-            "cat /readme.txt".to_string()
+            "cat /readme.txt".to_string(),
         );
-        
+
         let result = coordinator.handle_authenticated_command(&cat_msg);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "Hello from ZatBoard!");
@@ -926,53 +1176,75 @@ mod tests {
     #[test]
     fn test_echo_command() {
         let temp_dir = tempfile::tempdir().unwrap();
-        
+
         let mut coordinator = Coordinator::new(
-            3600, 
-            temp_dir.path().to_path_buf(), 
-            "http://test:9067".to_string()
+            3600,
+            temp_dir.path().to_path_buf(),
+            "http://test:9067".to_string(),
         );
-        coordinator.verified_users.insert("zs1user123".to_string(), "zs1reply456".to_string());
-        coordinator.filesystem.root.permissions.add_write_permission("zs1user123".to_string());
-        
+        coordinator
+            .verified_users
+            .insert("zs1user123".to_string(), "zs1reply456".to_string());
+        coordinator
+            .filesystem
+            .root
+            .permissions
+            .add_write_permission("zs1user123".to_string());
+
         let echo_msg = Message::new(
             "zs1user123".to_string(),
             "zs1coordinator".to_string(),
-            "echo \"Hello ZatBoard!\" > /greeting.txt".to_string()
+            "echo \"Hello ZatBoard!\" > /greeting.txt".to_string(),
         );
-        
+
         let result = coordinator.handle_authenticated_command(&echo_msg);
         assert!(result.is_ok());
         assert!(result.unwrap().contains("File created"));
-        
-        let file = coordinator.filesystem.resolve_path("/greeting.txt").unwrap();
+
+        let file = coordinator
+            .filesystem
+            .resolve_path("/greeting.txt")
+            .unwrap();
         assert_eq!(file.content, Some("Hello ZatBoard!".to_string()));
     }
 
     #[test]
     fn test_echo_update_existing_file() {
         let temp_dir = tempfile::tempdir().unwrap();
-        
+
         let mut coordinator = Coordinator::new(
-            3600, 
-            temp_dir.path().to_path_buf(), 
-            "http://test:9067".to_string()
+            3600,
+            temp_dir.path().to_path_buf(),
+            "http://test:9067".to_string(),
         );
-        coordinator.verified_users.insert("zs1user123".to_string(), "zs1reply456".to_string());
-        coordinator.filesystem.root.permissions.add_write_permission("zs1user123".to_string());
-        
-        coordinator.filesystem.create_file("/update.txt", "old content".to_string(), "zs1user123".to_string()).unwrap();
-        
+        coordinator
+            .verified_users
+            .insert("zs1user123".to_string(), "zs1reply456".to_string());
+        coordinator
+            .filesystem
+            .root
+            .permissions
+            .add_write_permission("zs1user123".to_string());
+
+        coordinator
+            .filesystem
+            .create_file(
+                "/update.txt",
+                "old content".to_string(),
+                "zs1user123".to_string(),
+            )
+            .unwrap();
+
         let echo_msg = Message::new(
             "zs1user123".to_string(),
             "zs1coordinator".to_string(),
-            "echo \"new content\" > /update.txt".to_string()
+            "echo \"new content\" > /update.txt".to_string(),
         );
-        
+
         let result = coordinator.handle_authenticated_command(&echo_msg);
         assert!(result.is_ok());
         assert!(result.unwrap().contains("File updated"));
-        
+
         let file = coordinator.filesystem.resolve_path("/update.txt").unwrap();
         assert_eq!(file.content, Some("new content".to_string()));
     }
@@ -980,26 +1252,35 @@ mod tests {
     #[test]
     fn test_chmod_command() {
         let temp_dir = tempfile::tempdir().unwrap();
-        
+
         let mut coordinator = Coordinator::new(
-            3600, 
-            temp_dir.path().to_path_buf(), 
-            "http://test:9067".to_string()
+            3600,
+            temp_dir.path().to_path_buf(),
+            "http://test:9067".to_string(),
         );
-        coordinator.verified_users.insert("zs1user123".to_string(), "zs1reply456".to_string());
-        coordinator.filesystem.root.permissions.add_write_permission("zs1user123".to_string());
-        coordinator.filesystem.create_file("/test.txt", "content".to_string(), "zs1user123".to_string()).unwrap();
-        
+        coordinator
+            .verified_users
+            .insert("zs1user123".to_string(), "zs1reply456".to_string());
+        coordinator
+            .filesystem
+            .root
+            .permissions
+            .add_write_permission("zs1user123".to_string());
+        coordinator
+            .filesystem
+            .create_file("/test.txt", "content".to_string(), "zs1user123".to_string())
+            .unwrap();
+
         let chmod_msg = Message::new(
             "zs1user123".to_string(),
             "zs1coordinator".to_string(),
-            "chmod private /test.txt".to_string()
+            "chmod private /test.txt".to_string(),
         );
-        
+
         let result = coordinator.handle_authenticated_command(&chmod_msg);
         assert!(result.is_ok());
         assert!(result.unwrap().contains("Permissions updated"));
-        
+
         let file = coordinator.filesystem.resolve_path("/test.txt").unwrap();
         assert!(!file.permissions.public_read);
     }
@@ -1007,26 +1288,39 @@ mod tests {
     #[test]
     fn test_grant_command() {
         let temp_dir = tempfile::tempdir().unwrap();
-        
+
         let mut coordinator = Coordinator::new(
-            3600, 
-            temp_dir.path().to_path_buf(), 
-            "http://test:9067".to_string()
+            3600,
+            temp_dir.path().to_path_buf(),
+            "http://test:9067".to_string(),
         );
-        coordinator.verified_users.insert("zs1user123".to_string(), "zs1reply456".to_string());
-        coordinator.filesystem.root.permissions.add_write_permission("zs1user123".to_string());
-        coordinator.filesystem.create_file("/shared.txt", "content".to_string(), "zs1user123".to_string()).unwrap();
-        
+        coordinator
+            .verified_users
+            .insert("zs1user123".to_string(), "zs1reply456".to_string());
+        coordinator
+            .filesystem
+            .root
+            .permissions
+            .add_write_permission("zs1user123".to_string());
+        coordinator
+            .filesystem
+            .create_file(
+                "/shared.txt",
+                "content".to_string(),
+                "zs1user123".to_string(),
+            )
+            .unwrap();
+
         let grant_msg = Message::new(
             "zs1user123".to_string(),
             "zs1coordinator".to_string(),
-            "grant read zs1other456 /shared.txt".to_string()
+            "grant read zs1other456 /shared.txt".to_string(),
         );
-        
+
         let result = coordinator.handle_authenticated_command(&grant_msg);
         assert!(result.is_ok());
         assert!(result.unwrap().contains("Read permission granted"));
-        
+
         let file = coordinator.filesystem.resolve_path("/shared.txt").unwrap();
         assert!(file.permissions.can_read("zs1other456"));
     }
@@ -1034,53 +1328,84 @@ mod tests {
     #[test]
     fn test_chat_command() {
         let temp_dir = tempfile::tempdir().unwrap();
-        
+
         let mut coordinator = Coordinator::new(
-            3600, 
-            temp_dir.path().to_path_buf(), 
-            "http://test:9067".to_string()
+            3600,
+            temp_dir.path().to_path_buf(),
+            "http://test:9067".to_string(),
         );
-        coordinator.verified_users.insert("zs1user123".to_string(), "zs1reply456".to_string());
-        
-        coordinator.filesystem.create_directory("/lobby", "coordinator".to_string()).unwrap();
-        
+        coordinator
+            .verified_users
+            .insert("zs1user123".to_string(), "zs1reply456".to_string());
+
+        coordinator
+            .filesystem
+            .create_directory("/lobby", "coordinator".to_string())
+            .unwrap();
+
         let chat_msg = Message::new(
             "zs1user123".to_string(),
             "zs1coordinator".to_string(),
-            "chat /lobby \"Hello everyone in the lobby!\"".to_string()
+            "chat /lobby \"Hello everyone in the lobby!\"".to_string(),
         );
-        
+
         let result = coordinator.handle_authenticated_command(&chat_msg);
         assert!(result.is_ok());
         assert!(result.unwrap().contains("Message sent to chatroom"));
-        
-        let chat_log = coordinator.filesystem.resolve_path("/lobby/.chat_log").unwrap();
-        assert!(chat_log.content.as_ref().unwrap().contains("Hello everyone in the lobby!"));
+
+        let chat_log = coordinator
+            .filesystem
+            .resolve_path("/lobby/.chat_log")
+            .unwrap();
+        assert!(chat_log
+            .content
+            .as_ref()
+            .unwrap()
+            .contains("Hello everyone in the lobby!"));
     }
 
     #[test]
     fn test_chat_history_command() {
         let temp_dir = tempfile::tempdir().unwrap();
-        
+
         let mut coordinator = Coordinator::new(
-            3600, 
-            temp_dir.path().to_path_buf(), 
-            "http://test:9067".to_string()
+            3600,
+            temp_dir.path().to_path_buf(),
+            "http://test:9067".to_string(),
         );
-        coordinator.verified_users.insert("zs1user123".to_string(), "zs1reply456".to_string());
-        coordinator.verified_users.insert("zs1user789".to_string(), "zs1reply000".to_string());
-        
-        coordinator.filesystem.create_directory("/general", "coordinator".to_string()).unwrap();
-        
-        let chat1 = Message::new("zs1user123".to_string(), "zs1coordinator".to_string(), "chat /general \"First message\"".to_string());
-        let chat2 = Message::new("zs1user789".to_string(), "zs1coordinator".to_string(), "chat /general \"Second message\"".to_string());
-        
+        coordinator
+            .verified_users
+            .insert("zs1user123".to_string(), "zs1reply456".to_string());
+        coordinator
+            .verified_users
+            .insert("zs1user789".to_string(), "zs1reply000".to_string());
+
+        coordinator
+            .filesystem
+            .create_directory("/general", "coordinator".to_string())
+            .unwrap();
+
+        let chat1 = Message::new(
+            "zs1user123".to_string(),
+            "zs1coordinator".to_string(),
+            "chat /general \"First message\"".to_string(),
+        );
+        let chat2 = Message::new(
+            "zs1user789".to_string(),
+            "zs1coordinator".to_string(),
+            "chat /general \"Second message\"".to_string(),
+        );
+
         coordinator.handle_authenticated_command(&chat1).unwrap();
         coordinator.handle_authenticated_command(&chat2).unwrap();
-        
-        let history_msg = Message::new("zs1user123".to_string(), "zs1coordinator".to_string(), "history /general".to_string());
+
+        let history_msg = Message::new(
+            "zs1user123".to_string(),
+            "zs1coordinator".to_string(),
+            "history /general".to_string(),
+        );
         let result = coordinator.handle_authenticated_command(&history_msg);
-        
+
         assert!(result.is_ok());
         let history = result.unwrap();
         assert!(history.contains("First message"));
@@ -1092,27 +1417,31 @@ mod tests {
     #[test]
     fn test_chat_permissions() {
         let temp_dir = tempfile::tempdir().unwrap();
-        
+
         let mut coordinator = Coordinator::new(
-            3600, 
-            temp_dir.path().to_path_buf(), 
-            "http://test:9067".to_string()
+            3600,
+            temp_dir.path().to_path_buf(),
+            "http://test:9067".to_string(),
         );
-        coordinator.verified_users.insert("zs1user123".to_string(), "zs1reply456".to_string());
-        
-        coordinator.filesystem.create_directory("/private", "coordinator".to_string()).unwrap();
+        coordinator
+            .verified_users
+            .insert("zs1user123".to_string(), "zs1reply456".to_string());
+
+        coordinator
+            .filesystem
+            .create_directory("/private", "coordinator".to_string())
+            .unwrap();
         let private_dir = coordinator.filesystem.resolve_path_mut("/private").unwrap();
         private_dir.permissions.public_read = false;
-        
+
         let chat_msg = Message::new(
             "zs1user123".to_string(),
             "zs1coordinator".to_string(),
-            "chat /private \"Secret message\"".to_string()
+            "chat /private \"Secret message\"".to_string(),
         );
-        
+
         let result = coordinator.handle_authenticated_command(&chat_msg);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Permission denied"));
     }
-
 }
