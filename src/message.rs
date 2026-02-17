@@ -72,9 +72,62 @@ impl Message {
     }
     
     pub fn from_zingo_transaction(
-        _transaction_data: &str
+        transaction_data: &str
     ) -> Result<Self, String> {
-        todo!("Parse from zingo-cli transaction output")
+        let value = serde_json::from_str::<serde_json::Value>(transaction_data)
+            .map_err(|e| format!("Invalid transaction JSON: {}", e))?;
+
+        let sender = value
+            .get("sender")
+            .and_then(|v| v.as_str())
+            .or_else(|| {
+                value
+                    .get("from")
+                    .and_then(|v| v.as_str())
+            })
+            .ok_or_else(|| "Missing sender field".to_string())?
+            .to_string();
+
+        let recipient = value
+            .get("recipient")
+            .and_then(|v| v.as_str())
+            .or_else(|| value.get("to").and_then(|v| v.as_str()))
+            .ok_or_else(|| "Missing recipient field".to_string())?
+            .to_string();
+
+        let memo = value
+            .get("memo")
+            .and_then(|v| v.as_str())
+            .or_else(|| {
+                value
+                    .get("memo_text")
+                    .and_then(|v| v.as_str())
+            })
+            .ok_or_else(|| "Missing memo field".to_string())?
+            .to_string();
+
+        let txid = value
+            .get("txid")
+            .and_then(|v| v.as_str())
+            .map(|v| v.to_string());
+
+        let signature = value
+            .get("signature")
+            .and_then(|v| v.as_str())
+            .map(|v| v.to_string());
+
+        let timestamp = value
+            .get("timestamp")
+            .and_then(|v| v.as_u64());
+
+        Ok(Message {
+            sender_address: sender,
+            recipient_address: recipient,
+            memo_text: memo,
+            txid,
+            signature,
+            timestamp,
+        })
     }
 }
 
@@ -120,5 +173,55 @@ mod tests {
         assert!(msg.verify_signature(private_key));
         
         assert!(!msg.verify_signature("wrong_key"));
+    }
+
+    #[test]
+    fn test_from_zingo_transaction_with_primary_fields() {
+        let raw = r#"{
+            "sender": "zs1sender",
+            "recipient": "zs1recipient",
+            "memo": "ls /home",
+            "txid": "abc123",
+            "signature": "sig",
+            "timestamp": 1700000000
+        }"#;
+
+        let msg = Message::from_zingo_transaction(raw).unwrap();
+        assert_eq!(msg.sender_address, "zs1sender");
+        assert_eq!(msg.recipient_address, "zs1recipient");
+        assert_eq!(msg.memo_text, "ls /home");
+        assert_eq!(msg.txid.as_deref(), Some("abc123"));
+        assert_eq!(msg.signature.as_deref(), Some("sig"));
+        assert_eq!(msg.timestamp, Some(1700000000));
+    }
+
+    #[test]
+    fn test_from_zingo_transaction_with_alias_fields() {
+        let raw = r#"{
+            "from": "zs1sender",
+            "to": "zs1recipient",
+            "memo_text": "cat /readme.txt"
+        }"#;
+
+        let msg = Message::from_zingo_transaction(raw).unwrap();
+        assert_eq!(msg.sender_address, "zs1sender");
+        assert_eq!(msg.recipient_address, "zs1recipient");
+        assert_eq!(msg.memo_text, "cat /readme.txt");
+        assert!(msg.txid.is_none());
+        assert!(msg.signature.is_none());
+        assert!(msg.timestamp.is_none());
+    }
+
+    #[test]
+    fn test_from_zingo_transaction_invalid_json() {
+        let result = Message::from_zingo_transaction("not-json");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_from_zingo_transaction_missing_required_fields() {
+        let raw = r#"{"sender":"zs1sender"}"#;
+        let result = Message::from_zingo_transaction(raw);
+        assert!(result.is_err());
     }
 }
