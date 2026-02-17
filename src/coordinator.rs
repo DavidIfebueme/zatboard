@@ -66,6 +66,10 @@ impl Coordinator {
         format!("P{}", &format!("{:x}", hasher.finalize())[..6].to_uppercase())
     }
 
+    fn truncate_for_log(value: &str, max_chars: usize) -> String {
+        value.chars().take(max_chars).collect()
+    }
+
     fn get_cached_response(&self, command: &str) -> Option<String> {
         if let Some((response, timestamp)) = self.response_cache.get(command) {
             if timestamp.elapsed().unwrap() < self.cache_duration {
@@ -87,7 +91,9 @@ impl Coordinator {
 
     pub fn send_response(&mut self, user_id: &str, response: &str) -> Result<(), String> {
         if let Some(reply_address) = self.get_reply_address(user_id) {
-            println!("📤 Sending response to {}: {}", &reply_address[..8], &response[..50]);
+            let reply_preview = Self::truncate_for_log(&reply_address, 8);
+            let response_preview = Self::truncate_for_log(response, 50);
+            println!("📤 Sending response to {}: {}", reply_preview, response_preview);
             match self.zingo_client.send_memo(&reply_address, 0, response) {
                 Ok(_result) => {
                     println!("✅ Response sent successfully");
@@ -476,9 +482,11 @@ impl Coordinator {
         if parts.len() != 2 {
             return Err("Invalid auth format. Use AUTH:<signed_challenge>".to_string());
         }
+
+        let provided_challenge = parts[1];
         
-        if let Some(_expected_challenge) = self.pending_challenges.get(&message.sender_address) {
-            if message.signature.is_some() {
+        if let Some(expected_challenge) = self.pending_challenges.get(&message.sender_address) {
+            if expected_challenge == provided_challenge && message.signature.is_some() {
                 let session_id = self.generate_session_id(&message.sender_address);
                 
                 let reply_address = self.auth_flow.session_manager
@@ -580,14 +588,32 @@ impl Coordinator {
         self.conversation_mappings.insert(conversation_id.clone(), message.sender_address.clone());
         self.user_conversations.insert(message.sender_address.clone(), conversation_id.clone());
         self.participant_mappings.insert(participant_id.clone(), message.sender_address.clone());
+
+        let challenge = self.auth_flow.initiate_authentication(
+            message.sender_address.clone(),
+            reply_address.clone(),
+        );
+        let challenge_value = challenge
+            .strip_prefix("AUTH_CHALLENGE:")
+            .unwrap_or("")
+            .to_string();
+        self.pending_challenges
+            .insert(message.sender_address.clone(), challenge_value.clone());
     
+        let sender_preview = Self::truncate_for_log(&message.sender_address, 12);
+        let reply_preview = Self::truncate_for_log(&reply_address, 12);
         println!("✅ New user registered: {} -> {}", 
-                &message.sender_address[..12], 
-                &reply_address[..12]);
+                sender_preview, 
+                reply_preview);
         
         println!("   ConvID: {} | PartID: {}", conversation_id, participant_id);
     
-        Ok(format!("Registration successful! ConvID: {} PartID: {} - Save these for future commands.", conversation_id, participant_id))
+        Ok(format!(
+            "Registration successful! ConvID: {} PartID: {} AUTH_CHALLENGE:{} - Save these for future commands.",
+            conversation_id,
+            participant_id,
+            challenge_value
+        ))
     }
     
     fn verify_sender_identity(&self, message: &Message) -> bool {
@@ -700,7 +726,6 @@ impl Coordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
     
     #[test]
     fn test_coordinator_registration() {
@@ -721,6 +746,50 @@ mod tests {
         let result = coordinator.process_incoming_message(&register_msg);
         assert!(result.is_ok());
         assert!(result.unwrap().contains("Registration successful!"));
+    }
+
+    #[test]
+    fn test_authentication_requires_matching_challenge() {
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        let mut coordinator = Coordinator::new(
+            3600,
+            temp_dir.path().to_path_buf(),
+            "http://test:9067".to_string(),
+        );
+
+        let register_msg = Message::new(
+            "zs1user123".to_string(),
+            "zs1coordinator456".to_string(),
+            "REGISTER:zs1reply789".to_string(),
+        );
+        coordinator.process_incoming_message(&register_msg).unwrap();
+
+        let mut bad_auth_msg = Message::new(
+            "zs1user123".to_string(),
+            "zs1coordinator456".to_string(),
+            "AUTH:wrong".to_string(),
+        );
+        bad_auth_msg.signature = Some("sig".to_string());
+
+        let bad_result = coordinator.process_incoming_message(&bad_auth_msg);
+        assert!(bad_result.is_err());
+
+        let expected = coordinator
+            .pending_challenges
+            .get("zs1user123")
+            .unwrap()
+            .clone();
+        let mut good_auth_msg = Message::new(
+            "zs1user123".to_string(),
+            "zs1coordinator456".to_string(),
+            format!("AUTH:{}", expected),
+        );
+        good_auth_msg.signature = Some("sig".to_string());
+
+        let good_result = coordinator.process_incoming_message(&good_auth_msg);
+        assert!(good_result.is_ok());
+        assert!(good_result.unwrap().contains("Authentication successful"));
     }
 
     #[test]
